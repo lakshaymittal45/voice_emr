@@ -1,52 +1,65 @@
-# 🎙️ Voice-Based EMR System
-
+### 🎙️ Voice-Based EMR System
 ## 📌 Project Overview
 
-This project implements a **voice-driven Electronic Medical Record (EMR) system** that converts doctor–patient conversations into **secure, structured clinical records** using AI.
+This project implements a voice-driven Electronic Medical Record (EMR) system that converts doctor–patient conversations into secure, structured clinical records using AI.
 
-The system processes raw consultation audio and performs:
+## The system ingests raw consultation audio and performs:
 
-- Speaker diarization (doctor vs patient)
-- Speaker-wise speech-to-text transcription
-- LLM-based clinical note extraction
-- AES-256 encryption of transcripts
-- Secure, role-based decryption for clinicians
-- Database storage (MySQL, DB2-ready)
+Speaker diarization (Doctor / Patient)
 
-The design follows **real hospital EMR principles**:  
-data is encrypted at rest and decrypted only for authorized medical staff.
+Speaker-wise speech-to-text transcription
 
----
+LLM-based clinical note extraction
+
+AES-256 encryption of transcripts
+
+Role-based secure access for clinicians
+
+Relational database storage (MySQL, DB2-ready)
+
+The architecture follows real hospital EMR security principles:
+➡️ No plaintext medical conversation is ever stored in the database.
+➡️ Decryption occurs only at runtime for authorized roles.
+
 
 ## ✅ Current Project Status
 
-This repository contains a **fully functional backend pipeline**.
+This repository contains a fully functional end-to-end system
+(backend + frontend + ML pipeline).
 
-### ✔ Completed
-- Project folder structure finalized
-- Python virtual environment setup
-- Stable dependency management
-- Speaker diarization using `pyannote.audio`
-- Speaker-wise transcription using `Whisper (medium)`
-- LLM-based clinical note extraction (Ollama – Gemma)
-- AES-256 encryption of transcripts before storage
-- Secure decryption API for authorized access
-- MySQL database integration (local development)
-- IBM DB2 schema prepared (hospital phase)
-- FastAPI backend with upload & retrieval APIs
-- Windows-compatible ML stack verified
+# ✔ Completed
 
-### ⏳ Deferred / Planned
-- MySQL → DB2 synchronization
-- JWT-based authentication (RBAC hardening)
-- Frontend UI integration
-- Hospital deployment configuration
+Finalized backend & frontend folder structure
 
----
+Stable Python virtual environment
+
+Dependency pinning for Windows & Linux
+
+Speaker diarization using pyannote.audio
+
+Low-latency speaker-wise transcription using Whisper (small, CPU-optimized)
+
+Accurate Hindi / Hinglish / English transcription (no forced transliteration)
+
+LLM-based clinical note extraction (Ollama – Gemma 3)
+
+AES-256 encryption of transcripts before database storage
+
+Secure role-based transcript access (doctor, admin)
+
+MySQL database integration (local development)
+
+DB2 schema prepared for hospital deployment
+
+FastAPI backend with upload & retrieval APIs
+
+Frontend UI (Next.js) for upload & consultation viewing
+
+Verified on Windows ML stack
+
+
 
 ## 🗂️ Project Structure
-
-```text
 voice_emr/
 │
 ├── backend/
@@ -54,98 +67,144 @@ voice_emr/
 │   │   ├── audio/
 │   │   │   └── recordings/        # Uploaded consultation audio
 │   │   │
-│   │   ├── diarization/           # Speaker diarization logic
-│   │   ├── transcription/         # Speaker-wise Whisper transcription
-│   │   ├── llm/                   # LLM clinical note extraction
+│   │   ├── diarization/           # Pyannote speaker diarization
+│   │   ├── transcription/         # Fast speaker-wise Whisper transcription
+│   │   ├── llm/                   # Clinical note extraction (Gemma)
 │   │   ├── encryption/            # AES-256 encryption / decryption
 │   │   ├── db/                    # MySQL & DB2 integration
-│   │   └── main.py                # FastAPI application entry point
+│   │   └── main.py                # FastAPI entry point
 │   │
 │   ├── requirements.txt
-│   └── .env                       # Environment variables (not committed)
+│   └── .env                       # Secrets (not committed)
+│
+├── frontend/                      # Next.js clinician UI
 │
 ├── venv/
 ├── .gitignore
 └── README.md
 
 
-## Environment Setup
-python -m venv venv
 
+## 🧪 Environment Setup
+# Create virtual environment
+python -m venv venv
+Activate
+# Windows
 venv\Scripts\activate
-## Install Dependencies
+
+
+# Linux / Mac
+source venv/bin/activate
+Install dependencies
+pip install --upgrade pip setuptools wheel
 pip install -r backend/requirements.txt
 
-
-start backend from backend folder-
+# ▶️ Running the Application
+Start backend-
 cd backend
 uvicorn app.main:app --reload
 
-start frontend
+
+Start frontend-
 cd frontend
 npm install
 npm run dev
 
-
-
-Test dairaization -
-python app/diarization/diarize.py D:\voice_emr\audio\Test.wav
-
-## Installation Verification Checks
-python -c "import numpy; print(numpy.__version__)"
+## 🔍 Testing Components
+Test diarization
+python app/diarization/diarize.py path/to/audio.wav
+Verify ML stack
 python -c "import torch; print(torch.__version__)"
 python -c "import whisper; print('Whisper OK')"
 python -c "from pyannote.audio import Pipeline; print('Pyannote OK')"
 python -c "import fastapi; print('FastAPI OK')"
-python -c "from cryptography.fernet import Fernet; print('Crypto OK')"
 
 
-## Planned System Workflow
+## 🔄 System Workflow
 Doctor–Patient Conversation
         ↓
-Audio Upload (FastAPI)
+Audio Upload (Frontend)
+        ↓
+FastAPI Backend
         ↓
 Speaker Diarization (Pyannote)
         ↓
-Speaker-wise Transcription (Whisper – Medium)
+Speaker-wise Transcription (Whisper – Small, CPU)
         ↓
 LLM Clinical Extraction (Gemma)
         ↓
 AES-256 Encryption
         ↓
-Database Storage (MySQL)
+Database Storage (Encrypted Only)
         ↓
-Secure Decryption for Authorized Users
+Authorized Decryption (Doctor / Admin)
+
+
+## 🧠 Key Technical Decisions (Why This Works)
+
+Whisper Small + Array Mode → low latency, high accuracy
+
+No forced transliteration → preserves speech fidelity
+
+Diarization-first pipeline → correct doctor/patient context
+
+Encrypt-before-store → zero trust DB model
+
+LLM extracts only structured notes → no hallucinated transcripts
 
 
 
-## Secuirty Design
-Encryption at Rest
 
-All consultation transcripts are encrypted using AES-256
+## ⚠️ Current Limitations
+1️⃣ Transcription Quality
 
-Encryption key is stored in .env, never in the database
+The system currently uses Whisper (small) for transcription to reduce end-to-end latency.
 
-Database stores only encrypted Base64 text
+As a result, transcription accuracy is lower compared to larger Whisper models (medium, large), especially for:
 
-Secure Decryption
+Fast speech
 
-Decryption occurs only in the backend
+Accents
 
-Only authorized roles (doctor, admin) can access decrypted transcripts
+Mixed-language conversations (Hindi–English / Hinglish)
 
-Database administrators cannot read patient conversations
+This trade-off was made intentionally to keep processing time acceptable on CPU-only systems.
 
-This aligns with real hospital EMR security practices.
+2️⃣ Latency Constraints
 
-## 🚀 Next Milestones
+End-to-end processing latency is still relatively high due to:
 
-MySQL → DB2 synchronization
+Speaker diarization (Pyannote)
 
-JWT-based authentication & RBAC
+Multiple Whisper inference calls (per speaker segment)
 
-Frontend dashboard for clinicians
+While optimizations were applied (array-based transcription, smaller model), real-time or near-real-time performance is not yet achieved.
 
-Audit logging and compliance hardening
+GPU acceleration and batch inference are planned future improvements.
 
-Hospital deployment configuration
+3️⃣ Limited LLM Evaluation
+
+LLM-based clinical note extraction has not been extensively evaluated due to:
+
+Limited availability of realistic medical consultation recordings
+
+Use of short or synthetic sample audio during development
+
+Clinical extraction quality is expected to improve significantly once longer, real-world consultation recordings are used.
+
+
+
+## 🔮 Planned Improvements
+
+Upgrade transcription to Whisper Medium / Large with GPU support
+
+Implement batched inference to reduce diarization + transcription overhead
+
+Add confidence-based segment filtering
+
+Evaluate LLM extraction using long-form, real consultation recordings
+
+Introduce quantitative accuracy benchmarks (WER, speaker attribution accuracy)
+
+
+

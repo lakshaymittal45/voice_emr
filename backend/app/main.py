@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import tempfile
 from datetime import datetime
@@ -7,17 +8,15 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-# ---------------- INTERNAL APP IMPORTS ----------------
-
+# ---------------- INTERNAL IMPORTS ----------------
 from app.diarization.diarize import run_diarization
 from app.transcription.transcribe import speaker_wise_transcription
 from app.llm.extract_notes import extract_clinical_notes
 from app.db.mysql_connection import get_mysql_connection
 from app.encryption.aes_encrypt import encrypt_text, decrypt_text
 
-
 # ------------------------------------------------------------------
-# Load environment variables
+# Setup
 # ------------------------------------------------------------------
 
 load_dotenv()
@@ -28,21 +27,13 @@ if not AES_KEY or len(AES_KEY.encode("utf-8")) != 32:
 
 AES_KEY = AES_KEY.encode("utf-8")
 
-# ------------------------------------------------------------------
-# App Setup
-# ------------------------------------------------------------------
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Voice EMR Backend",
-    version="1.0.0",
-    description="Voice-based EMR audio processing service"
-)
+app = FastAPI(title="Voice EMR Backend")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,19 +48,7 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "audio", "recordings")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # ------------------------------------------------------------------
-# Health Check
-# ------------------------------------------------------------------
-
-@app.get("/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "service": "voice-emr",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-# ------------------------------------------------------------------
-# Upload Consultation Audio (FULL PIPELINE)
+# Upload Consultation Audio (ML RUNS ONLY HERE)
 # ------------------------------------------------------------------
 
 @app.post("/upload-consultation-audio")
@@ -78,25 +57,19 @@ async def upload_consultation_audio(
     clinician: str,
     audio: UploadFile = File(...)
 ):
-    logger.info(
-        f"Received consultation audio | patient={patient_id} | clinician={clinician}"
-    )
-
     if not audio.filename:
         raise HTTPException(status_code=400, detail="Invalid audio file")
 
-    # Save audio
     suffix = os.path.splitext(audio.filename)[-1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=UPLOAD_DIR) as tmp:
         audio_path = tmp.name
         tmp.write(await audio.read())
 
-    logger.info(f"Audio saved to {audio_path}")
+    logger.info(f"Audio saved: {audio_path}")
 
     try:
-        # 1️⃣ Diarization
+        # 1️⃣ Speaker diarization
         segments = run_diarization(audio_path)
-        logger.info(f"Diarization complete | segments={len(segments)}")
 
         # 2️⃣ Speaker-wise transcription
         speaker_transcript = speaker_wise_transcription(
@@ -107,23 +80,35 @@ async def upload_consultation_audio(
         if not speaker_transcript:
             raise RuntimeError("Empty speaker-wise transcript")
 
-        # 3️⃣ LLM extraction
+        # 3️⃣ Clinical note extraction (LLM)
         clinical_notes = extract_clinical_notes(speaker_transcript)
 
-        # 4️⃣ Encrypt transcript
-        full_transcript = " ".join([s["text"] for s in speaker_transcript])
-        encrypted_transcript = encrypt_text(full_transcript, AES_KEY)
+        # 4️⃣ Encrypt speaker-wise transcript JSON
+        transcript_json = json.dumps(
+            speaker_transcript,
+            ensure_ascii=False
+        )
 
-        # 5️⃣ DB insert
+        encrypted_transcript = encrypt_text(
+            transcript_json,
+            AES_KEY
+        )
+
+        # 5️⃣ Store in DB (ONLY encrypted text)
         conn = get_mysql_connection()
         cursor = conn.cursor()
 
         cursor.execute(
             """
             INSERT INTO audio_records
-            (patient_id, handling_clinician, time_of_capture,
-             audio_file_path, transcript_encrypted)
-            VALUES (%s, %s, %s, %s, %s)
+            (
+                patient_id,
+                handling_clinician,
+                time_of_capture,
+                audio_file_path,
+                transcript_encrypted
+            )
+            VALUES (%s,%s,%s,%s,%s)
             """,
             (
                 patient_id,
@@ -139,10 +124,18 @@ async def upload_consultation_audio(
         cursor.execute(
             """
             INSERT INTO clinical_notes
-            (audio_id, handling_clinician,
-             chief_complaint, history_of_present_illness,
-             associated_diseases, past_medical_history,
-             drug_history, allergies, assessment, treatment_plan)
+            (
+                audio_id,
+                handling_clinician,
+                chief_complaint,
+                history_of_present_illness,
+                associated_diseases,
+                past_medical_history,
+                drug_history,
+                allergies,
+                assessment,
+                treatment_plan
+            )
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """,
             (
@@ -171,17 +164,17 @@ async def upload_consultation_audio(
         }
 
     except Exception as e:
-        logger.exception("Failed to process consultation audio")
+        logger.exception("Upload pipeline failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------------------------------------------------------------
-# View Decrypted Transcript (AUTHORIZED)
+# View Consultation (NO ML, DB ONLY)
 # ------------------------------------------------------------------
 
 @app.get("/consultation/{audio_id}")
 async def get_consultation(
     audio_id: int,
-    role: str = Query(..., description="doctor | admin")
+    role: str = Query(...)
 ):
     if role not in ["doctor", "admin"]:
         raise HTTPException(status_code=403, detail="Unauthorized")
@@ -190,10 +183,9 @@ async def get_consultation(
     cursor = conn.cursor(dictionary=True)
 
     cursor.execute(
-        "SELECT * FROM audio_records WHERE audio_id = %s",
+        "SELECT * FROM audio_records WHERE audio_id=%s",
         (audio_id,)
     )
-
     record = cursor.fetchone()
     cursor.close()
     conn.close()
@@ -201,22 +193,17 @@ async def get_consultation(
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    decrypted_transcript = decrypt_text(
+    # 🔓 Decrypt + parse transcript JSON
+    decrypted = decrypt_text(
         record["transcript_encrypted"],
         AES_KEY
     )
+
+    speaker_transcript = json.loads(decrypted)
 
     return {
         "audio_id": audio_id,
         "patient_id": record["patient_id"],
         "clinician": record["handling_clinician"],
-        "transcript": decrypted_transcript
+        "transcript": speaker_transcript
     }
-
-# ------------------------------------------------------------------
-# Run Server
-# ------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

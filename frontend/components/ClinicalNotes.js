@@ -1,22 +1,15 @@
 export default function ClinicalNotes({ notes }) {
-  if (!notes) return <p>No clinical notes generated.</p>;
+  if (!notes) return <p>No clinical notes.</p>;
 
   return (
     <section>
       <h2>📋 Clinical Notes</h2>
-
-      {Object.entries(notes).map(([key, value]) => (
-        <div key={key} style={{ marginBottom: 12 }}>
-          <strong>{formatLabel(key)}:</strong>
-          <p>{value || "—"}</p>
+      {Object.entries(notes).map(([k, v]) => (
+        <div key={k}>
+          <strong>{k.replace(/_/g, " ")}:</strong>
+          <p>{v || "—"}</p>
         </div>
       ))}
     </section>
   );
-}
-
-function formatLabel(label) {
-  return label
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
 }

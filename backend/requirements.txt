@@ -1,6 +1,6 @@
 # ---------------- CORE NUMERICAL ----------------
 numpy==1.26.4
-scipy>=1.10.0,<1.12.0
+scipy>=1.10.0,<1.13.0
 
 # ---------------- PYTORCH STACK -----------------
 torch==2.1.2
@@ -10,11 +10,10 @@ torchaudio==2.1.2
 # ---------------- AUDIO PROCESSING --------------
 soundfile>=0.12.1
 librosa>=0.10.1
-pydub>=0.25.1
-ffmpeg-python>=0.2.0
 
 # ---------------- TRANSCRIPTION -----------------
 openai-whisper>=20231117
+sentencepiece>=0.1.99
 
 # ---------------- DIARIZATION -------------------
 pyannote.audio==3.1.1

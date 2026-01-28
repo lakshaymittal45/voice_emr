@@ -10,7 +10,6 @@ export default function UploadPage() {
   const [patientId, setPatientId] = useState("");
   const [clinician, setClinician] = useState("");
   const [role, setRole] = useState("doctor");
-
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -31,16 +30,12 @@ export default function UploadPage() {
 
       const res = await fetch(
         `http://127.0.0.1:8000/upload-consultation-audio?patient_id=${patientId}&clinician=${clinician}`,
-        {
-          method: "POST",
-          body: formData
-        }
+        { method: "POST", body: formData }
       );
 
       if (!res.ok) throw new Error("Upload failed");
 
       const result = await res.json();
-
       router.push(`/consultation/${result.audio_id}?role=${role}`);
     } catch (err) {
       setError(err.message);
@@ -54,19 +49,13 @@ export default function UploadPage() {
       <h1>➕ Upload Consultation</h1>
 
       <form onSubmit={handleSubmit}>
-        <input
-          placeholder="Patient ID"
-          value={patientId}
-          onChange={(e) => setPatientId(e.target.value)}
-        />
+        <input placeholder="Patient ID" value={patientId}
+          onChange={(e) => setPatientId(e.target.value)} />
 
         <br /><br />
 
-        <input
-          placeholder="Clinician Name"
-          value={clinician}
-          onChange={(e) => setClinician(e.target.value)}
-        />
+        <input placeholder="Clinician Name" value={clinician}
+          onChange={(e) => setClinician(e.target.value)} />
 
         <br /><br />
 
@@ -77,15 +66,12 @@ export default function UploadPage() {
 
         <br /><br />
 
-        <input
-          type="file"
-          accept="audio/*"
-          onChange={(e) => setAudio(e.target.files[0])}
-        />
+        <input type="file" accept="audio/*"
+          onChange={(e) => setAudio(e.target.files[0])} />
 
         <br /><br />
 
-        <button type="submit" disabled={loading}>
+        <button disabled={loading}>
           {loading ? "Uploading..." : "Upload"}
         </button>
 

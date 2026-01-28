@@ -1,67 +1,120 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 
-import TranscriptViewer from "@/components/TranscriptViewer";
-import ClinicalNotes from "@/components/ClinicalNotes";
+export default function TranscriptViewer({ transcript }) {
+  const router = useRouter();
 
-export default function ConsultationPage() {
-  const { audioId } = useParams();
-  const searchParams = useSearchParams();
+  // 🔴 No transcript at all
+  if (!transcript) {
+    return (
+      <section>
+        <BackButton />
+        <p>No transcript available.</p>
+      </section>
+    );
+  }
 
-  const role = searchParams.get("role") || "doctor";
+  // ✅ Case 1: Speaker-wise transcript (EXPECTED)
+  if (Array.isArray(transcript)) {
+    return (
+      <section>
+        <BackButton />
+        <h2 style={{ marginTop: 12 }}>🗣️ Consultation Transcript</h2>
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+        {transcript.map((seg, index) => (
+          <div
+            key={index}
+            style={{
+              marginBottom: 14,
+              padding: 12,
+              borderRadius: 8,
+              backgroundColor:
+                seg.speaker === "Doctor" ? "#eef6ff" : "#f9f9f9",
+              borderLeft:
+                seg.speaker === "Doctor"
+                  ? "4px solid #3b82f6"
+                  : "4px solid #10b981",
+            }}
+          >
+            {/* Header */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontWeight: "bold",
+              }}
+            >
+              <span>{seg.speaker || "Speaker"}</span>
 
-  useEffect(() => {
-    async function fetchConsultation() {
-      try {
-        setLoading(true);
+              {seg.start != null && seg.end != null && (
+                <span style={{ fontSize: 12, color: "#666" }}>
+                  [{formatTime(seg.start)} – {formatTime(seg.end)}]
+                </span>
+              )}
+            </div>
 
-        const res = await fetch(
-          `http://127.0.0.1:8000/consultation/${audioId}?role=${role}`
-        );
+            {/* Text */}
+            <p style={{ marginTop: 6 }}>{seg.text || "—"}</p>
 
-        if (!res.ok) {
-          throw new Error("Failed to fetch consultation data");
-        }
+            {/* Confidence (optional) */}
+            {typeof seg.confidence === "number" && (
+              <p style={{ fontSize: 12, color: "#777" }}>
+                Confidence: {(seg.confidence * 100).toFixed(1)}%
+              </p>
+            )}
+          </div>
+        ))}
+      </section>
+    );
+  }
 
-        const result = await res.json();
-        setData(result);
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    }
+  // ✅ Case 2: Plain string transcript (fallback)
+  if (typeof transcript === "string") {
+    return (
+      <section>
+        <BackButton />
+        <h2>🗣️ Consultation Transcript</h2>
+        <pre style={{ whiteSpace: "pre-wrap" }}>{transcript}</pre>
+      </section>
+    );
+  }
 
-    fetchConsultation();
-  }, [audioId, role]);
+  // ❌ Unknown format
+  return (
+    <section>
+      <BackButton />
+      <p>Unsupported transcript format.</p>
+    </section>
+  );
+}
 
-  if (loading) return <p>⏳ Loading consultation...</p>;
-  if (error) return <p style={{ color: "red" }}>❌ {error}</p>;
+/* -------------------------------------------------- */
+/* Helpers                                            */
+/* -------------------------------------------------- */
+
+function BackButton() {
+  const router = useRouter();
 
   return (
-    <main style={{ padding: 24 }}>
-      <h1>🩺 Consultation View</h1>
-
-      <p>
-        <strong>Patient ID:</strong> {data.patient_id}
-      </p>
-      <p>
-        <strong>Clinician:</strong> {data.clinician}
-      </p>
-
-      <hr />
-
-      <TranscriptViewer transcript={data.transcript} />
-
-      <hr />
-
-      <ClinicalNotes notes={data.clinical_notes} />
-    </main>
+    <button
+      onClick={() => router.push("/upload")}
+      style={{
+        padding: "6px 12px",
+        borderRadius: 6,
+        border: "1px solid #ccc",
+        background: "#fff",
+        cursor: "pointer",
+        marginBottom: 8,
+      }}
+    >
+      ⬅️ Back to Upload
+    </button>
   );
+}
+
+function formatTime(seconds = 0) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
