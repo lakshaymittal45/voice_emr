@@ -59,7 +59,10 @@ Verified on Windows ML stack
 
 
 
+
 ## 🗂️ Project Structure
+
+```text
 voice_emr/
 │
 ├── backend/
