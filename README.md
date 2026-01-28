@@ -65,24 +65,24 @@ voice_emr/
 ├── backend/
 │   ├── app/
 │   │   ├── audio/
-│   │   │   └── recordings/        # Uploaded consultation audio
+│   │   │   └── recordings/        # Uploaded consultation audio (ignored in git)
 │   │   │
 │   │   ├── diarization/           # Pyannote speaker diarization
 │   │   ├── transcription/         # Fast speaker-wise Whisper transcription
-│   │   ├── llm/                   # Clinical note extraction (Gemma)
+│   │   ├── llm/                   # Clinical note extraction (Gemma via Ollama)
 │   │   ├── encryption/            # AES-256 encryption / decryption
 │   │   ├── db/                    # MySQL & DB2 integration
 │   │   └── main.py                # FastAPI entry point
 │   │
 │   ├── requirements.txt
-│   └── .env                       # Secrets (not committed)
+│   └── .env                       # Secrets (NOT committed)
 │
 ├── frontend/                      # Next.js clinician UI
 │
-├── venv/
+├── venv/                          # Python virtual environment (ignored)
+│
 ├── .gitignore
 └── README.md
-
 
 ## 🧪 Environment Setup
 # Create virtual environment
