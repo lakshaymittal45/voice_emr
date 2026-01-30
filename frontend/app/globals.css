@@ -1,29 +1,642 @@
+/* -------------------------------
+   RESET & BASE
+-------------------------------- */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+}
+
 body {
-  font-family: system-ui, Arial, sans-serif;
-  background: #f4f6f8;
-  color: #222;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue",
+    sans-serif;
+  background-color: #f4f6f8;
+  color: #111827;
+  line-height: 1.5;
 }
 
-main {
+/* -------------------------------
+   NAVBAR (STRUCTURE ONLY)
+-------------------------------- */
+.navbar {
   background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.navbar-inner {
+  max-width: 960px;
+  margin: auto;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  min-height: 56px;
+  
+}
+
+.navbar-title {
+  font-size: 30px;
+  font-weight: 600;
+  color: #020617;              /* slate-950 */
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 24px auto 30px;
+}
+/* ===============================
+   NAV BACK BUTTON
+================================ */
+
+.nav-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+
+  padding: 6px 10px;
   border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-}
 
-input, select, button {
-  padding: 8px;
+  background: #f1f5f9;              /* subtle surface */
+  border: 1px solid #e2e8f0;
+
   font-size: 14px;
-}
-
-button {
+  font-weight: 500;
+  color: #2563eb;
+  justify-content: flex-start;
   cursor: pointer;
-  background: #2563eb;
-  color: white;
-  border: none;
-  border-radius: 4px;
+  transition: all 0.2s ease;
 }
 
-button:disabled {
+/* Hover */
+.nav-back:hover {
+  background: #e0ecff;
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+/* Active (click feedback) */
+.nav-back:active {
+  transform: translateY(1px);
+}
+
+/* Focus (keyboard accessibility) */
+.nav-back:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+.nav-back:hover {
+  text-decoration: underline;
+}
+/* -------------------------------
+   APP HEADING (MAIN IDENTITY)
+-------------------------------- */
+.app-heading {
+  max-width: 960px;
+  margin: 24px auto 30px; /* reduced gap */
+  padding: 0 24px;
+  text-align: center;
+}
+
+.app-title {
+  font-size: 50px;
+  font-weight: 700;
+  color: #0f172a;
+  letter-spacing: -0.02em;
+}
+
+.app-tagline {
+  margin-top: 6px;
+  font-size: 15px;
+  color: #475569;
+}
+
+/* -------------------------------
+   PAGE LAYOUT
+-------------------------------- */
+.page-wrapper {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+}
+
+
+/* -------------------------------
+   CARD
+-------------------------------- */
+.card {
+  background: #ffffff;
+  width: 100%;
+  max-width: 520px;
+  margin: 24px auto 24px;
+  border-radius: 12px;
+  padding: 36px 40px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+  text-align: center;
+}
+.center-card {
+  display: flex;
+  justify-content: center;
+}
+
+/* -------------------------------
+   TYPOGRAPHY
+-------------------------------- */
+.card h2 {
+  font-size: 22px;
+  font-weight: 600;
+  color: #111827;
+  margin-bottom: 12px;
+}
+
+.card p {
+  font-size: 15px;
+  color: #4b5563;
+  margin-bottom: 28px;
+  line-height: 1.6;
+}
+
+/* -------------------------------
+   BUTTONS
+-------------------------------- */
+.button-primary {
+  background-color: #2563eb;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 12px 26px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+
+.button-primary:hover {
+  background-color: #1d4ed8;
+}
+
+.button-primary:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* -------------------------------
+   FORM LAYOUT
+-------------------------------- */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+/* -------------------------------
+   FORM GROUP
+-------------------------------- */
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* -------------------------------
+   LABELS
+-------------------------------- */
+.form-group label {
+  font-size: 20px;
+  font-weight: 500;
+  color: #374151; /* slate-700 */
+}
+
+/* -------------------------------
+   INPUTS & SELECT
+-------------------------------- */
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 11px 12px;
+  font-size: 18px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db; /* gray-300 */
+  background-color: #ffffff;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* Placeholder */
+.form-group input::placeholder {
+  color: #9ca3af; /* gray-400 */
+}
+
+/* Focus state */
+.form-group input:focus,
+.form-group select:focus {
+  outline: none;
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+}
+
+/* -------------------------------
+   FILE INPUT (CLEANER LOOK)
+-------------------------------- */
+.form-group input[type="file"] {
+  padding: 8px;
+  font-size: 15px;
+  background-color: #f9fafb;
+  cursor: pointer;
+}
+
+/* -------------------------------
+   SUBMIT BUTTON
+-------------------------------- */
+.button-primary {
+  margin-top: 10px;
+  background-color: #2563eb;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.05s ease;
+}
+
+.button-primary:hover {
+  background-color: #1d4ed8;
+}
+
+.button-primary:active {
+  transform: translateY(1px);
+}
+
+.button-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* -------------------------------
+   ERROR MESSAGE
+-------------------------------- */
+.status-error {
+  margin-top: 8px;
+  font-size: 13px;
+  color: #dc2626; /* red-600 */
+  text-align: center;
+}
+
+/* -------------------------------
+   UTILITIES
+-------------------------------- */
+.text-center {
+  text-align: center;
+}
+
+
+/* -------------------------------
+   PROCESSING PAGE
+-------------------------------- */
+
+.processing-wrapper {
+  min-height: calc(100vh - 56px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+
+.processing-card {
+  background: #ffffff;
+  max-width: 420px;
+  width: 100%;
+  padding: 36px 32px;
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+  text-align: center;
+}
+
+/* Heading */
+.processing-card h1 {
+  font-size: 22px;
+  font-weight: 600;
+  color: #0f172a; /* slate-900 */
+  margin-bottom: 10px;
+}
+
+/* Description text */
+.processing-card p {
+  font-size: 14px;
+  color: #475569; /* slate-600 */
+  margin-bottom: 6px;
+  line-height: 1.6;
+}
+
+/* Subtle spinner */
+.processing-spinner {
+  width: 42px;
+  height: 42px;
+  margin: 18px auto 20px;
+  border: 3px solid #e5e7eb;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+/* Animation */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Helper note */
+.processing-note {
+  font-size: 13px;
+  color: #64748b; /* slate-500 */
+  margin-top: 8px;
+}
+
+
+/*Consulation page*/
+/* ===============================
+   CONSULTATION INFO CARD
+================================ */
+.info-card {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 32px;
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 28px 34px;
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.04);
+  margin-bottom: 48px;
+}
+.info-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* Field label (Patient ID, Clinician, etc.) */
+.info-card .label {
+  font-size: 15px;
+  font-weight: 700;
+  color: #2d3b4e;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+/* Field value */
+.info-card span:last-child {
+  font-size: 17px;
+  font-weight: 500;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.info-card > div {
+  padding-left: 12px;
+  border-left: 3px solid #e5e7eb;
+}
+.info-card:hover {
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.08),
+    0 4px 10px rgba(0, 0, 0, 0.05);
+}
+
+/* ===============================
+   SECTIONS (Transcript / Notes)
+================================ */
+.section {
+  margin-bottom: 64px;
+}
+
+/* Section heading */
+.section-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #0f172a;
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+
+  /* visual anchor */
+  border-bottom: 1px solid #e5e7eb;
+
+  /* subtle spacing polish */
+  letter-spacing: -0.01em;
+}
+.section-title {
+  position: relative;
+  padding-left: 14px;
+}
+
+.section-title::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  width: 4px;
+  height: 70%;
+  background-color: #2563eb;
+  border-radius: 2px;
+}
+.section-title::before {
+  background-color: #c7d2fe; /* soft indigo */
+}
+
+
+
+/* ===============================
+   CLINICAL NOTES
+================================ */
+.notes-box {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 28px 32px;
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.04);
+}
+
+/* One clinical field */
+.notes-item {
+  margin-bottom: 28px;
+  padding-left: 14px;
+  border-left: 3px solid #e5e7eb;
+}
+
+/* Clinical label (HPI, Assessment, etc.) */
+.notes-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #2563eb;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+/* Clinical content */
+.notes-value {
+  font-size: 15px;
+  color: #111827;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.notes-item.assessment,
+.notes-item.treatment {
+  border-left-color: #2563eb;
+}
+.notes-value.empty {
+  color: #9ca3af;
+  font-style: italic;
+}
+.notes-item:not(:last-child) {
+  padding-bottom: 18px;
+  border-bottom: 1px dashed #e5e7eb;
+}
+
+
+/* ===============================
+   TRANSCRIPT VIEWER (REFINED)
+================================ */
+
+.transcript-box {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+}
+
+/* Single transcript row */
+.transcript-line {
+  position: relative;
+  padding: 18px 20px 18px 22px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  border-left: 5px solid transparent;
+}
+
+/* Speaker variants */
+.speaker-doctor {
+  background: #f0f7ff;
+  border-left-color: #2563eb;
+}
+
+.speaker-patient {
+  background: #eefcf6;
+  border-left-color: #10b981;
+}
+
+/* Header row */
+.transcript-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+/* Speaker label */
+.transcript-speaker {
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+/* Timestamp */
+.transcript-time {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+}
+
+/* Confidence */
+.transcript-confidence {
+  margin-left: auto;
+  font-size: 12px;
+  color: #475569;
+}
+
+/* Transcript text */
+.transcript-text {
+  font-size: 15px;
+  line-height: 1.7;
+  color: #1f2937;
+  margin-top: 4px;
+}
+
+/* Raw transcript fallback */
+.transcript-raw {
+  white-space: pre-wrap;
+  font-size: 14px;
+  color: #1f2937;
+}
+
+/* Empty / fallback text */
+.empty-text {
+  font-size: 14px;
+  color: #64748b;
+  text-align: center;
+  padding: 24px;
+}
+
+/* Expand transcript on click */
+.transcript-line.expanded .transcript-text {
+  max-height: none;
+}
+
+.transcript-line.expanded .transcript-text::after {
+  display: none;
+}
+
+
+/* ===============================
+   CLINICAL NOTES (REFINED)
+================================ */
+
+.notes-box {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 32px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.08);
+}
+
+/* Individual note block */
+.notes-item {
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.notes-item:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+/* Label (e.g. Chief Complaint) */
+.notes-label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+/* Value text */
+.notes-value {
+  font-size: 15px;
+  line-height: 1.7;
+  color: #0f172a;
+  white-space: pre-wrap;
+}
+
+/* Empty state */
+.empty-text {
+  font-size: 14px;
+  color: #64748b;
+  text-align: center;
+  padding: 20px 0;
 }

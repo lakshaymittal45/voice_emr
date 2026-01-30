@@ -1,157 +1,8 @@
-# import os
-# import torch
-# import whisper
-# import librosa
-# import tempfile
-# import soundfile as sf
-# import logging
-# from typing import List, Dict
-
-# from indic_transliteration import sanscript
-# from indic_transliteration.sanscript import transliterate
-
-# # ------------------------------------------------------------------
-# # Setup
-# # ------------------------------------------------------------------
-
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s | %(levelname)s | %(message)s"
-# )
-
-# DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-# MODEL_NAME = "medium"
-
-# logging.info(f"Loading Whisper model ({MODEL_NAME}) on {DEVICE}...")
-# WHISPER_MODEL = whisper.load_model(MODEL_NAME, device=DEVICE)
-# logging.info("Whisper model loaded")
-
-# # ------------------------------------------------------------------
-# # Helpers
-# # ------------------------------------------------------------------
-
-# def transliterate_hindi_only(text: str) -> str:
-#     """
-#     Transliterate ONLY Devanagari (Hindi) characters → Roman.
-#     Leaves English / Spanish untouched.
-#     """
-#     try:
-#         return transliterate(text, sanscript.DEVANAGARI, sanscript.ITRANS)
-#     except Exception:
-#         return text
-
-
-# def map_speaker_label(label: str) -> str:
-#     """
-#     Map pyannote speaker labels → human readable roles.
-#     """
-#     if label == "SPEAKER_00":
-#         return "Doctor"
-#     if label == "SPEAKER_01":
-#         return "Patient"
-#     return label
-
-
-# def estimate_confidence(text: str) -> float:
-#     """
-#     Simple heuristic confidence score.
-#     (Whisper does not expose true confidence)
-#     """
-#     if not text:
-#         return 0.0
-#     length = len(text.split())
-#     return min(0.95, 0.6 + (length / 50))
-
-
-# # ------------------------------------------------------------------
-# # Core transcription
-# # ------------------------------------------------------------------
-
-# def transcribe_audio(audio_path: str) -> str:
-#     if not os.path.exists(audio_path):
-#         raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-#     audio, _ = librosa.load(audio_path, sr=16000, mono=True)
-
-#     if len(audio) < 16000:
-#         audio = librosa.util.fix_length(audio, size=16000)
-
-#     logging.info(f"Transcribing audio (original language): {audio_path}")
-
-#     result = WHISPER_MODEL.transcribe(
-#         audio,
-#         task="transcribe",     # keep original language
-#         language=None,         # auto-detect
-#         fp16=False,
-#         temperature=0,
-#         condition_on_previous_text=False
-#     )
-
-#     raw_text = result.get("text", "").strip()
-#     text = transliterate_hindi_only(raw_text)
-
-#     logging.info("Transcription complete")
-#     return text
-
-
-# # ------------------------------------------------------------------
-# # Speaker-wise transcription
-# # ------------------------------------------------------------------
-
-# def speaker_wise_transcription(
-#     audio_path: str,
-#     diarization_segments: List[Dict]
-# ) -> List[Dict]:
-
-#     if not os.path.exists(audio_path):
-#         raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-#     results = []
-
-#     for seg in diarization_segments:
-#         start = seg["start"]
-#         end = seg["end"]
-#         speaker_raw = seg["speaker"]
-
-#         duration = end - start
-#         if duration <= 0:
-#             continue
-
-#         audio, _ = librosa.load(
-#             audio_path,
-#             sr=16000,
-#             mono=True,
-#             offset=start,
-#             duration=duration
-#         )
-
-#         if len(audio) < 16000:
-#             audio = librosa.util.fix_length(audio, size=16000)
-
-#         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-#             sf.write(tmp.name, audio, 16000)
-#             temp_audio_path = tmp.name
-
-#         try:
-#             text = transcribe_audio(temp_audio_path)
-#         finally:
-#             os.unlink(temp_audio_path)
-
-#         results.append({
-#             "speaker": map_speaker_label(speaker_raw),
-#             "start": round(start, 2),
-#             "end": round(end, 2),
-#             "text": text,
-#             "confidence": round(estimate_confidence(text), 2)
-#         })
-
-#     return results
 import os
-import torch
-import whisper
-import librosa
 import logging
+import soundfile as sf
 from typing import List, Dict
+from faster_whisper import WhisperModel
 
 # ------------------------------------------------------------------
 # Setup
@@ -162,64 +13,99 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# ================================================================
+# 🔥 MODEL CONFIG (CPU SAFE)
+# ================================================================
+MODEL_NAME = "medium"          # 🔥 medium is TOO SLOW on CPU
+DEVICE = "cpu"
+COMPUTE_TYPE = "int8"
+# ================================================================
 
-# ⚡ Best speed–quality tradeoff for Hindi + Hinglish
-MODEL_NAME = "small"
+logging.info(
+    f"Loading Faster-Whisper model ({MODEL_NAME}) "
+    f"on {DEVICE.upper()} with {COMPUTE_TYPE}..."
+)
 
-logging.info(f"Loading Whisper model ({MODEL_NAME}) on {DEVICE}...")
-WHISPER_MODEL = whisper.load_model(MODEL_NAME, device=DEVICE)
-logging.info("Whisper model loaded")
+WHISPER_MODEL = WhisperModel(
+    MODEL_NAME,
+    device=DEVICE,
+    compute_type=COMPUTE_TYPE
+)
+
+logging.info("Faster-Whisper model loaded")
 
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 
 def map_speaker_label(label: str) -> str:
-    """
-    Map diarization labels to roles.
-    (Diarization already mapped in your pipeline, this is safety)
-    """
-    if label.lower() == "doctor":
+    label = label.lower()
+    if label == "doctor":
         return "Doctor"
-    if label.lower() == "patient":
+    if label == "patient":
         return "Patient"
-    return label
+    return "Unknown"
 
 
 def estimate_confidence(text: str) -> float:
-    """
-    Heuristic confidence score (Whisper doesn't expose true confidence).
-    """
     if not text:
         return 0.0
+
     words = len(text.split())
-    return round(min(0.95, 0.6 + words / 60), 2)
+    if words <= 3:
+        return 0.75
+    if words <= 8:
+        return 0.82
+    return round(min(0.95, 0.82 + words / 120), 2)
 
 # ------------------------------------------------------------------
-# Core transcription (ARRAY MODE, NO TEMP FILES)
+# Transcribe FULL audio ONCE (FAST + SAFE)
 # ------------------------------------------------------------------
 
-def transcribe_audio_array(audio_array) -> str:
+def transcribe_full_audio(audio_path: str):
     """
-    Transcribe a numpy audio array directly.
-    Preserves original language/script.
+    CPU-safe Whisper transcription.
+    - No word timestamps (FAST)
+    - No context chaining (SAFE)
+    - VAD only for longer audio
     """
 
-    result = WHISPER_MODEL.transcribe(
-        audio_array,
-        task="transcribe",
-        language=None,                  # auto Hindi / English
-        fp16=(DEVICE == "cuda"),
-        temperature=0,
-        condition_on_previous_text=False,
-        no_speech_threshold=0.6
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(audio_path)
+
+    duration = sf.info(audio_path).duration
+    use_vad = duration > 15.0
+
+    logging.info(
+        f"Starting Whisper transcription | "
+        f"duration={duration:.2f}s | VAD={'ON' if use_vad else 'OFF'}"
     )
 
-    return result.get("text", "").strip()
+    segments, info = WHISPER_MODEL.transcribe(
+        audio_path,
+        language=None,
+
+        # 🔥 CPU-OPTIMIZED SETTINGS
+        beam_size=4,
+        best_of=4,
+        temperature=0.0,
+
+        condition_on_previous_text=False,
+        word_timestamps=False,
+
+        vad_filter=use_vad,
+        vad_parameters={"min_silence_duration_ms": 900} if use_vad else None,
+    )
+
+    logging.info(
+        f"Whisper detected language={info.language} "
+        f"(prob={info.language_probability:.2f})"
+    )
+
+    return list(segments)
 
 # ------------------------------------------------------------------
-# Speaker-wise transcription (FAST + CLEAN)
+# Speaker-wise transcription (ROBUST)
 # ------------------------------------------------------------------
 
 def speaker_wise_transcription(
@@ -228,35 +114,50 @@ def speaker_wise_transcription(
 ) -> List[Dict]:
 
     if not os.path.exists(audio_path):
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        raise FileNotFoundError(audio_path)
 
-    # Load full audio ONCE
-    audio_full, _ = librosa.load(audio_path, sr=16000, mono=True)
+    # 🔥 SAFETY NET: empty diarization
+    if not diarization_segments:
+        logging.warning("Empty diarization segments → fallback to whole audio")
+        diarization_segments = [{
+            "speaker": "Unknown",
+            "start": 0.0,
+            "end": sf.info(audio_path).duration
+        }]
+
+    logging.info("Starting full-audio Whisper transcription")
+    whisper_segments = transcribe_full_audio(audio_path)
+    logging.info("Whisper transcription finished")
 
     results = []
 
-    for seg in diarization_segments:
-        start = seg["start"]
-        end = seg["end"]
-        speaker = map_speaker_label(seg["speaker"])
+    for dseg in diarization_segments:
+        d_start = dseg["start"]
+        d_end = dseg["end"]
+        speaker = map_speaker_label(dseg["speaker"])
 
-        start_i = int(start * 16000)
-        end_i = int(end * 16000)
+        texts = []
 
-        segment_audio = audio_full[start_i:end_i]
+        for wseg in whisper_segments:
+            # 🔥 Overlap-based alignment (SAFE)
+            if wseg.end > d_start and wseg.start < d_end:
+                texts.append(wseg.text.strip())
 
-        # Skip very small/noisy segments
-        if len(segment_audio) < 16000:
+        final_text = " ".join(texts).strip()
+        if not final_text:
             continue
-
-        text = transcribe_audio_array(segment_audio)
 
         results.append({
             "speaker": speaker,
-            "start": round(start, 2),
-            "end": round(end, 2),
-            "text": text,
-            "confidence": estimate_confidence(text)
+            "start": round(d_start, 2),
+            "end": round(d_end, 2),
+            "text": final_text,
+            "confidence": estimate_confidence(final_text)
         })
+
+    logging.info(
+        f"Speaker-wise transcription completed | "
+        f"segments={len(results)}"
+    )
 
     return results

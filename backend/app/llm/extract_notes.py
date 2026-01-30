@@ -7,8 +7,41 @@ from typing import List, Dict
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "gemma3:4b"
+PRIMARY_MODEL = "gemma3:4b"
+FALLBACK_MODEL = "qwen2.5:3b-instruct"
 
+OLLAMA_TIMEOUT = 45
+MAX_CHARS = 4000  # 🔥 prevent long LLM stalls
+
+EMPTY_CLINICAL_NOTE = {
+    "chief_complaint": None,
+    "history_of_present_illness": None,
+    "associated_diseases": None,
+    "past_medical_history": None,
+    "drug_history": None,
+    "allergies": None,
+    "assessment": None,
+    "treatment_plan": None
+}
+
+# ------------------------------------------------------------------
+# Ollama availability check
+# ------------------------------------------------------------------
+
+def _ollama_available() -> bool:
+    try:
+        subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            timeout=5
+        )
+        return True
+    except Exception:
+        return False
+
+# ------------------------------------------------------------------
+# Prompt builder
+# ------------------------------------------------------------------
 
 def _build_prompt(speaker_transcript: List[Dict[str, str]]) -> str:
     conversation = "\n".join(
@@ -17,82 +50,106 @@ def _build_prompt(speaker_transcript: List[Dict[str, str]]) -> str:
         if seg.get("text")
     )
 
-    prompt = f"""
+    conversation = conversation[:MAX_CHARS]
+
+    return f"""
 You are a medical documentation assistant.
 
-The following doctor–patient conversation may contain Hindi, English,
-or mixed Hindi-English (Hinglish).
+The conversation may contain Hindi, English, or Hinglish.
+Internally translate to English before extracting information.
 
 IMPORTANT:
-- First, internally translate the entire conversation into English.
-- Then extract clinical information based on the translated meaning.
-- DO NOT include the translated conversation in the output.
-- DO NOT include explanations, reasoning, or markdown.
+- If no clinical information is present, return all fields as null.
+- Do NOT hallucinate.
 
-STRICT OUTPUT RULES:
-- Output ONLY valid JSON
+RULES:
+- Output ONE valid JSON object only
+- No explanations, no markdown, no extra text
 - Use null if information is missing
-- Do not hallucinate
-- Be concise and clinically accurate
 
 Return JSON with EXACT keys:
-- chief_complaint
-- history_of_present_illness
-- associated_diseases
-- past_medical_history
-- drug_history
-- allergies
-- assessment
-- treatment_plan
+chief_complaint
+history_of_present_illness
+associated_diseases
+past_medical_history
+drug_history
+allergies
+assessment
+treatment_plan
 
 Conversation:
-<<<
 {conversation}
->>>
-"""
-    return prompt.strip()
+""".strip()
 
+# ------------------------------------------------------------------
+# Ollama runner
+# ------------------------------------------------------------------
+
+def _run_ollama(model_name: str, prompt: str) -> str:
+    logger.info(f"Calling Ollama model: {model_name}")
+
+    result = subprocess.run(
+        ["ollama", "run", model_name],
+        input=prompt,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=OLLAMA_TIMEOUT
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+
+    return result.stdout.strip()
+
+# ------------------------------------------------------------------
+# JSON parser
+# ------------------------------------------------------------------
+
+def _safe_parse_json(raw: str) -> Dict:
+    if not raw or not raw.strip():
+        return EMPTY_CLINICAL_NOTE.copy()
+
+    raw = re.sub(r"```.*?```", "", raw, flags=re.DOTALL).strip()
+    match = re.search(r"\{[\s\S]*\}", raw)
+
+    if not match:
+        return EMPTY_CLINICAL_NOTE.copy()
+
+    try:
+        return json.loads(match.group())
+    except json.JSONDecodeError:
+        return EMPTY_CLINICAL_NOTE.copy()
+
+# ------------------------------------------------------------------
+# Public API
+# ------------------------------------------------------------------
 
 def extract_clinical_notes(
     speaker_transcript: List[Dict[str, str]]
 ) -> Dict:
 
     if not speaker_transcript:
-        raise ValueError("Empty speaker transcript passed to LLM")
+        return EMPTY_CLINICAL_NOTE.copy()
+
+    if not _ollama_available():
+        logger.error("Ollama not running → skipping LLM")
+        return EMPTY_CLINICAL_NOTE.copy()
 
     prompt = _build_prompt(speaker_transcript)
-    logger.info("Calling Ollama for clinical extraction...")
 
     try:
-        result = subprocess.run(
-            ["ollama", "run", MODEL_NAME],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        logger.error("Ollama execution failed")
-        logger.error("STDOUT:\n%s", e.stdout)
-        logger.error("STDERR:\n%s", e.stderr)
-        raise RuntimeError("Ollama failed during clinical extraction")
+        raw = _run_ollama(PRIMARY_MODEL, prompt)
+        return _safe_parse_json(raw)
 
-    raw_output = result.stdout.strip()
-
-    match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-    if not match:
-        logger.error("No valid JSON found in LLM output")
-        logger.error("Raw output:\n%s", raw_output)
-        raise ValueError("LLM did not return valid JSON")
+    except Exception as e:
+        logger.warning(f"Primary model failed → fallback ({e})")
 
     try:
-        structured = json.loads(match.group())
-    except json.JSONDecodeError as e:
-        logger.error("JSON parsing failed")
-        logger.error("Extracted JSON:\n%s", match.group())
-        raise ValueError("Malformed JSON returned by LLM") from e
+        raw = _run_ollama(FALLBACK_MODEL, prompt)
+        return _safe_parse_json(raw)
 
-    logger.info("Clinical extraction complete")
-    return structured
+    except Exception as e:
+        logger.error(f"Fallback model failed → empty note ({e})")
+        return EMPTY_CLINICAL_NOTE.copy()
