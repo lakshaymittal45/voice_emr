@@ -34,7 +34,7 @@ export default function ProcessingPage() {
       } catch {
         // silent retry
       }
-    }, 3000);
+    }, 5000); // Poll every 5 seconds (reduced from 3s to minimize log spam)
 
     return () => {
       if (intervalRef.current) {

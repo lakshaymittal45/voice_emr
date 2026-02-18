@@ -11,6 +11,8 @@ torchaudio==2.1.2
 # ---------------- AUDIO PROCESSING --------------
 soundfile>=0.12.1
 librosa>=0.10.1
+pydub>=0.25.1           # Audio manipulation and format conversion
+noisereduce>=3.0.0      # AI-powered noise reduction for clinical environments
 
 # ---------------- TRANSCRIPTION -----------------
 faster-whisper>=1.0.3
@@ -38,3 +40,12 @@ python-dotenv>=1.0.0
 tqdm>=4.66.0
 pandas>=2.0.3
 requests>=2.31.0
+
+# ---------------- HARDWARE DETECTION -------------
+psutil>=5.9.0          # System resource monitoring
+GPUtil>=1.4.0          # GPU detection and monitoring
+
+# ---------------- TRANSLATION (Better than Romanization) ----
+googletrans==4.0.0rc1  # Google Translate API for natural translations
+                       # Converts "मेरे सिर में दर्द है" → "My head hurts"
+                       # Much better quality than indic-transliteration

@@ -17,6 +17,8 @@ export default function ConsultationPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [activeTab, setActiveTab] = useState("transcript");
+  const [showBackToTop, setShowBackToTop] = useState(false);
 
   const fetchedRef = useRef(false);
 
@@ -42,6 +44,19 @@ export default function ConsultationPage() {
     fetchConsultation();
   }, [audioId, role]);
 
+  // Back to top button visibility
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 400);
+    };
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   return (
     <>
       {/* Navbar */}
@@ -49,55 +64,108 @@ export default function ConsultationPage() {
         <div className="navbar-inner">
           <button
             className="nav-back"
-            onClick={() => router.push("/upload")}
+            onClick={() => router.push("/")}
           >
-            ← Back to Upload
+            ← Home
           </button>
+          <div className="navbar-title">
+            📋 Consultation #{audioId}
+          </div>
         </div>
       </nav>
-
-      {/* App Heading */}
-      <header className="app-heading">
-        <h1 className="app-title">🩺 Consultation View</h1>
-        <p className="app-tagline">Audio-based clinical consultation</p>
-      </header>
 
       {/* Page Content */}
       <main className="page-wrapper">
         {loading && (
-          <p className="status-text">⏳ Loading consultation…</p>
+          <div className="loading-state">
+            <div className="spinner"></div>
+            <p>Loading consultation data...</p>
+          </div>
         )}
 
         {error && (
-          <p className="status-error">❌ {error}</p>
+          <div className="error-state">
+            <span className="error-icon">⚠️</span>
+            <p className="error-message">{error}</p>
+            <button onClick={() => router.push("/")} className="button-primary">
+              Go Home
+            </button>
+          </div>
         )}
 
         {data && (
           <>
-            {/* Consultation Metadata */}
-            <section className="info-card">
-              <div>
-                <span className="label">Patient ID</span>
-                <span>{data.patient_id}</span>
-              </div>
-              <div>
-                <span className="label">Clinician</span>
-                <span>{data.clinician}</span>
+            {/* Consultation Metadata Card */}
+            <section className="info-card-enhanced">
+              <div className="info-row">
+                <div className="info-item">
+                  <span className="info-label">👤 Patient ID</span>
+                  <span className="info-value">{data.patient_id}</span>
+                </div>
+                <div className="info-item">
+                  <span className="info-label">👨‍⚕️ Clinician</span>
+                  <span className="info-value">{data.clinician}</span>
+                </div>
+                <div className="info-item">
+                  <span className="info-label">🔒 Access Role</span>
+                  <span className="info-value">{role}</span>
+                </div>
+                <div className="info-item">
+                  <span className="info-label">📊 Status</span>
+                  <span className="status-badge-success">✓ Processed</span>
+                </div>
               </div>
             </section>
 
-            {/* Transcript */}
-            <section className="section">
-              <h2 className="section-title">Conversation Transcript</h2>
-              <TranscriptViewer transcript={data.transcript} />
-            </section>
+            {/* Tab Navigation */}
+            <div className="tab-navigation">
+              <button
+                className={`tab-button ${activeTab === "transcript" ? "active" : ""}`}
+                onClick={() => setActiveTab("transcript")}
+              >
+                🎙️ Transcript
+                {data.transcript && ` (${data.transcript.length})`}
+              </button>
+              <button
+                className={`tab-button ${activeTab === "notes" ? "active" : ""}`}
+                onClick={() => setActiveTab("notes")}
+              >
+                📝 Clinical Notes
+              </button>
+              <button
+                className={`tab-button ${activeTab === "both" ? "active" : ""}`}
+                onClick={() => setActiveTab("both")}
+              >
+                📋 Both
+              </button>
+            </div>
 
-            {/* Clinical Notes */}
-            <section className="section">
-              <h2 className="section-title">Clinical Notes</h2>
-              <ClinicalNotes notes={data.clinical_notes} />
-            </section>
+            {/* Tab Content */}
+            {(activeTab === "transcript" || activeTab === "both") && (
+              <section className="section">
+                {activeTab === "both" && <h2 className="section-title">Conversation Transcript</h2>}
+                <TranscriptViewer transcript={data.transcript} />
+              </section>
+            )}
+
+            {(activeTab === "notes" || activeTab === "both") && (
+              <section className="section">
+                {activeTab === "both" && <h2 className="section-title">Clinical Notes</h2>}
+                <ClinicalNotes notes={data.clinical_notes} />
+              </section>
+            )}
           </>
+        )}
+
+        {/* Back to Top Button */}
+        {showBackToTop && (
+          <button
+            className="back-to-top"
+            onClick={scrollToTop}
+            title="Back to top"
+          >
+            ↑
+          </button>
         )}
       </main>
     </>
