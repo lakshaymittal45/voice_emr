@@ -8,15 +8,27 @@ A voice-driven Electronic Medical Record system that converts doctor–patient c
 
 ## ✨ Features
 
-- 🎤 **Live recording** via WebSocket with real-time incremental transcription
+### Core Features
+- 🎤 **Live recording** via WebSocket with real-time incremental transcription (8s intervals)
 - 📁 **Bulk audio upload** with background processing queue
-- 🗣️ **Speaker diarization** — Doctor / Patient / Nurse / others (configurable)
+- 🗣️ **Speaker diarization** — Generic speaker labels (SPEAKER_00, SPEAKER_01, etc.)
 - 🌏 **Multilingual transcription** — Whisper auto-detects Hindi, Punjabi, Haryanvi, Hinglish, English
 - 🌐 **Google Translate integration** — native script → natural English for all staff
 - 🤖 **LLM clinical extraction** — structured notes (chief complaint, assessment, treatment plan, etc.)
 - 🔒 **AES-256 encryption** — transcripts encrypted before database storage, decrypted only at runtime
+
+### New Features (v2.0)
+- 👨‍⚕️ **Doctor Dashboard** — Search patients by ID with autocomplete dropdown
+- 📋 **Appointment History** — View all consultations for any patient with dates, clinicians, and durations
+- 🖨️ **Professional PDF Export** — Medical document styling with proper headers, footers, and page breaks
+- ⚡ **Faster Live Transcription** — Reduced from 15s to 8s intervals for near real-time updates
+- 🎯 **Fixed Diarization** — No more duplicate text, center-based segment alignment
+- 🏷️ **Generic Speaker Labels** — Changed from hardcoded Doctor/Patient to SPEAKER_00, SPEAKER_01, SPEAKER_02
+
+### System Intelligence
 - 📊 **Auto hardware detection** — selects optimal Whisper and LLM models based on your CPU/GPU/RAM
 - 🛡️ **Security hardened** — tight CORS, input sanitization, no PHI in logs, timezone-aware UTC timestamps
+- 🔄 **Automatic fallback** — gracefully degrades to smaller models if primary model fails
 
 ---
 
@@ -200,10 +212,16 @@ voice_emr/
 │   └── .env                 # your secrets — git-ignored
 ├── frontend/                # Next.js UI
 │   └── app/
-│       ├── upload/
-│       ├── upload-bulk/
-│       ├── live-record/
-│       └── consultation/[audioId]/
+│       ├── upload/               # Single file upload
+│       ├── upload-bulk/          # Multiple file upload
+│       ├── live-record/          # Real-time recording with WebSocket
+│       ├── doctor-dashboard/     # Patient search & appointment history
+│       ├── consultation/[audioId]/  # View transcript & clinical notes
+│       └── processing/           # Processing status page
+│   └── components/
+│       ├── LiveRecorder.js       # WebSocket recording component
+│       ├── TranscriptViewer.js   # Display speaker-wise transcript
+│       └── ClinicalNotes.js      # Display extracted clinical notes
 └── venv/
 │
 ├── .gitignore
@@ -212,11 +230,23 @@ voice_emr/
 ```
 ---
 ## 📡 API Endpoints
+POST` | `/consultation-status-batch` | Batch status check for multiple audio IDs |
+| `GET` | `/consultation/{audio_id}` | Retrieve decrypted transcript + clinical notes |
+| `GET` | `/patients` | List all patients with appointment stats |
+| `GET` | `/patient/{patient_id}/appointments` | Get all appointments for a specific patient |
+| `GET` | `/models/status` | Hardware info & active model selection |
+| `GET` | `/health` | Health check endpoint |
+| `WS` | `/ws/live-record` | WebSocket live recording stream |
 
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/upload-consultation-audio` | Upload a single audio file for processing |
-| `POST` | `/upload-bulk` | Upload multiple audio files |
+**Live recording** WebSocket params: `?patient_id=<id>&clinician_id=<id>&role=doctor`
+
+### Doctor Dashboard Workflow
+
+1. **Search Patient**: GET `/patients` returns all patients with their stats
+2. **Autocomplete**: Frontend filters patient IDs as doctor types
+3. **View History**: GET `/patient/{patient_id}/appointments` returns all consultations
+4. **View Details**: Click any appointment → GET `/consultation/{audio_id}` for full transcript & notes
+5. **Export PDF**: Print button generates professional medical document with proper styling
 | `GET` | `/consultation-status/{audio_id}` | Poll processing status |
 | `GET` | `/consultation/{audio_id}` | Retrieve decrypted transcript + clinical notes |
 | `GET` | `/models/status` | Hardware info & active model selection |
@@ -253,7 +283,74 @@ Authorized Decryption (Doctor / Admin)
 
 ---
 
-## 🌏 Multilingual Support
+## � What's New in v2.0
+
+### Doctor Dashboard
+A centralized hub for doctors to search and access patient records:
+
+**Features:**
+- **Smart Search**: Type patient ID with autocomplete dropdown
+- **Patient Stats**: See total patients and consultations at a glance
+- **Appointment History**: View all consultations for any patient
+- **Quick Access**: Click any appointment to view full transcript and clinical notes
+
+**How to Use:**
+1. Navigate to home page → Click "🔍 Doctor Dashboard"
+2. Start typing a patient ID (e.g., "2444")
+3. Select from dropdown or press Enter
+4. View list of all appointments for that patient
+5. Click any appointment card to see full details
+
+### Professional PDF Export
+Transform your consultation pages into print-ready medical documents:
+
+**Features:**
+- **Medical Document Header**: Facility name, document ID, timestamp
+- **Professional Layout**: A4 page size with proper margins
+- **Clean Typography**: Serif fonts for body, sans-serif for headers
+- **Page Management**: Automatic page breaks, prevents orphaned sections
+- **Confidentiality Notice**: Footer with "CONFIDENTIAL MEDICAL RECORD" warning
+- **Print-Optimized**: Hides all interactive elements (buttons, navigation)
+
+**How to Use:**
+1. Open any consultation page
+2. Click the export dropdown → "🖨️ Print"
+3. In print dialog, select "Save as PDF" or "Microsoft Print to PDF"
+4. Save the professional medical document
+
+### Improved Diarization
+Fixed major issues with speaker attribution:
+
+**What Changed:**
+- ❌ **Before**: Hardcoded "Doctor" and "Patient" labels
+- ✅ **After**: Generic "SPEAKER_00", "SPEAKER_01", "SPEAKER_02", etc.
+
+- ❌ **Before**: Same text appeared for both speakers (duplicate bug)
+- ✅ **After**: Each segment assigned to only one speaker (center-based alignment)
+
+**Why This Matters:**
+- Works for any number of speakers (doctor + patient + nurse + family)
+- No more duplicate text in transcripts
+- Accurate speaker attribution even in overlapping speech
+- More reliable clinical documentation
+
+### Faster Live Transcription
+Reduced latency for real-time recording:
+
+**Performance Improvements:**
+- **Incremental Updates**: 15 seconds → **8 seconds** (47% faster)
+- **Minimum Duration**: 3.0 seconds → **2.0 seconds** (33% faster start)
+- **WebSocket Debugging**: Enhanced logging for connection issues
+- **Better Feedback**: Immediate "Connected" confirmation message
+
+**Impact:**
+- Doctors see transcription updates almost 2x faster
+- More responsive live recording experience
+- Better for short consultations
+
+---
+
+## �🌏 Multilingual Support
 
 Whisper auto-detects the language per segment — no manual configuration needed.
 
