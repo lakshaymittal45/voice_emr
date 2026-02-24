@@ -1,6 +1,7 @@
 import os
 import logging
 import soundfile as sf
+from collections import Counter
 from typing import List, Dict, Optional, Tuple
 from faster_whisper import WhisperModel
 import time
@@ -388,12 +389,10 @@ def get_whisper_model(preferred_model: Optional[str] = None) -> Tuple[WhisperMod
 # ------------------------------------------------------------------
 
 def map_speaker_label(label: str) -> str:
-    label = label.lower()
-    if label == "doctor":
-        return "Doctor"
-    if label == "patient":
-        return "Patient"
-    return "Unknown"
+    """Preserve speaker labels as-is (SPEAKER_00, SPEAKER_01, etc.)"""
+    # Just return the label as-is from diarization
+    # No more hardcoded Doctor/Patient mapping
+    return label or "SPEAKER_UNKNOWN"
 
 
 def estimate_confidence(text: str) -> float:
@@ -406,6 +405,109 @@ def estimate_confidence(text: str) -> float:
     if words <= 8:
         return 0.82
     return round(min(0.95, 0.82 + words / 120), 2)
+
+
+# ------------------------------------------------------------------
+# 🛡️ ANTI-HALLUCINATION: Post-processing filter
+# ------------------------------------------------------------------
+
+def _is_hallucinated(text: str) -> bool:
+    """
+    Detect whether a single segment's text is a Whisper hallucination.
+
+    Checks:
+      1. Character-level repetition (e.g. "🎶🎶🎶🎶🎶🎶🎶")
+      2. Word/phrase-level repetition (e.g. "ਸੁਣੋ ਸੁਣੋ ਸੁਣੋ ਸੁਣੋ")
+      3. Very short repeated token spam
+      4. Common known hallucination phrases across languages
+
+    Returns True if the segment looks hallucinated.
+    """
+    if not text or not text.strip():
+        return True
+
+    text = text.strip()
+
+    # -------- 1.  Character-level repetition --------
+    no_space = text.replace(" ", "")
+    if len(no_space) > 8:
+        unique_chars = len(set(no_space))
+        ratio = unique_chars / len(no_space)
+        if ratio < 0.15:          # <15 % unique chars = extreme repetition
+            return True
+
+    # -------- 2.  Word/phrase-level repetition --------
+    words = text.split()
+    if len(words) >= 4:
+        # Check if any single word makes up ≥60 % of all words
+        counts = Counter(words)
+        most_common_word, most_common_count = counts.most_common(1)[0]
+        if most_common_count / len(words) >= 0.60:
+            return True
+
+        # Check for repeating bigrams  (e.g. "ab cd ab cd ab cd")
+        bigrams = [f"{words[i]} {words[i+1]}" for i in range(len(words) - 1)]
+        if bigrams:
+            bg_counts = Counter(bigrams)
+            top_bg, top_bg_count = bg_counts.most_common(1)[0]
+            if top_bg_count >= 4 and top_bg_count / len(bigrams) >= 0.50:
+                return True
+
+    # -------- 3.  Known hallucination phrases --------
+    # Whisper is known to emit these on silence / noise:
+    KNOWN_HALLUCINATIONS = [
+        "thanks for watching",
+        "thank you for watching",
+        "please subscribe",
+        "subscribe to my channel",
+        "like and subscribe",
+        "subtítulos realizados por la comunidad",
+        "sous-titres réalisés par",
+        "amara.org",
+        "untertitel der amara.org-community",
+        "MBC 뉴스",
+        "ご視聴ありがとうございました",
+        "सुनिए",       # Hindi: "listen" repeated
+        "ਸੁਣੋ",        # Punjabi: "listen" repeated
+        "ధన్యవాదాలు",   # Telugu: "thanks"
+    ]
+    text_lower = text.lower().strip()
+    for phrase in KNOWN_HALLUCINATIONS:
+        if text_lower == phrase.lower() or text_lower.startswith(phrase.lower()):
+            return True
+
+    return False
+
+
+def _filter_hallucinated_segments(segments, model_name: str):
+    """
+    Remove hallucinated segments from Whisper output.
+    Logs warnings for every dropped segment so we can monitor.
+    """
+    if not segments:
+        return segments
+
+    clean = []
+    dropped = 0
+    for seg in segments:
+        if _is_hallucinated(seg.text):
+            dropped += 1
+            logging.warning(
+                f"🚨 Hallucination dropped | model={model_name} | "
+                f"text='{seg.text[:80]}…'" if len(seg.text) > 80 else
+                f"🚨 Hallucination dropped | model={model_name} | "
+                f"text='{seg.text}'"
+            )
+        else:
+            clean.append(seg)
+
+    if dropped:
+        logging.warning(
+            f"🛡️ Anti-hallucination filter: removed {dropped}/{dropped+len(clean)} "
+            f"segments (model={model_name})"
+        )
+    return clean
+
 
 # ------------------------------------------------------------------
 # Transcribe FULL audio ONCE (ENHANCED with Medical-Grade Models)
@@ -478,11 +580,32 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
             # 🔥 CPU-OPTIMIZED SETTINGS
             beam_size=5,  # Increased for better medical term accuracy
             best_of=5,
-            temperature=0.0,
 
-            condition_on_previous_text=False,
+            # 🛡️ ANTI-HALLUCINATION: Use fallback temperatures.
+            # If beam-search at 0.0 confidence falls below thresholds,
+            # Whisper will retry with increasing randomness to escape loops.
+            temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+
+            # 🛡️ ANTI-HALLUCINATION: Penalise repeated tokens
+            repetition_penalty=1.15,     # >1 discourages the same token again
+            no_repeat_ngram_size=4,      # Block exact 4-gram repetition
+
+            # 🛡️ ANTI-HALLUCINATION: Tighter quality gates
+            compression_ratio_threshold=1.8,  # Default 2.4 is too lenient for Indic scripts
+            log_prob_threshold=-0.8,          # Reject low-confidence hallucinated segments
+            no_speech_threshold=0.5,          # Stricter silence detection
+
+            # 🛡️ ANTI-HALLUCINATION: Skip phantom text generated during silence
+            hallucination_silence_threshold=0.5,  # (seconds) — if a segment spans
+                                                  # a gap of >=0.5 s of silence, drop it
+
+            condition_on_previous_text=False,  # Prevents looping on prev output
             word_timestamps=False,
 
+            # 🌐 Better language detection for multilingual audio
+            language_detection_segments=4,  # Use 4 segments instead of 1
+
+            # VAD for longer audio
             vad_filter=use_vad,
             vad_parameters={"min_silence_duration_ms": 900} if use_vad else None,
         )
@@ -526,26 +649,13 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
                 except Exception as e:
                     logging.error(f"🔍 DEBUG: Failed to save debug file: {e}")
         
-        # 🚨 HALLUCINATION DETECTION: Check for repeated symbols (Whisper bug)
+        # 🚨 HALLUCINATION FILTER: Remove hallucinated segments
+        # Whisper (especially small/medium on Indic languages) tends to:
+        #   a) Repeat a word/phrase many times in one segment
+        #   b) Generate very high compression-ratio gibberish
+        #   c) Emit the same char/symbol pattern endlessly
         if result:
-            sample_text = result[0].text if len(result) > 0 else ""
-            # Check if text is mostly repeated characters/symbols
-            if len(sample_text) > 10:
-                unique_chars = len(set(sample_text.replace(' ', '')))
-                total_chars = len(sample_text.replace(' ', ''))
-                repetition_ratio = 1 - (unique_chars / total_chars) if total_chars > 0 else 0
-                if repetition_ratio > 0.9:
-                    logging.error(
-                        f"🚨 HALLUCINATION DETECTED! Whisper model '{model_name}' is hallucinating "
-                        f"({repetition_ratio*100:.0f}% repetition). "
-                        f"Sample: '{sample_text[:50]}...'"
-                    )
-                    logging.warning(
-                        f"💡 TRY: Upgrade to 'medium' or 'large-v3' model for better quality. "
-                        f"Current model 'small' struggles with low-quality audio and Indic languages."
-                    )
-                    # Don't return empty - let translation/LLM try to salvage it
-                    # but warn the user
+            result = _filter_hallucinated_segments(result, model_name)
         
         # 🌐 GOOGLE TRANSLATE: Convert native scripts to English for staff readability
         # Stores natural English: "My head hurts" instead of awkward romanization
@@ -653,6 +763,7 @@ def speaker_wise_transcription(
     logging.info(f"✅ Whisper transcription finished | Active model: {ACTIVE_MODEL_NAME}")
 
     results = []
+    used_whisper_segments = set()  # Track which Whisper segments have been assigned
 
     for dseg in diarization_segments:
         d_start = dseg["start"]
@@ -661,13 +772,20 @@ def speaker_wise_transcription(
 
         texts = []
 
-        for wseg in whisper_segments:
-            # 🔥 Overlap-based alignment (SAFE)
-            if wseg.end > d_start and wseg.start < d_end:
-                # 🔍 DEBUG: Check text encoding right from Whisper
+        for idx, wseg in enumerate(whisper_segments):
+            # Skip if already assigned to another speaker
+            if idx in used_whisper_segments:
+                continue
+                
+            # 🔥 IMPROVED: Use center-based alignment to prevent duplicates
+            # Assign segment to speaker only if its center falls within speaker's time range
+            segment_center = (wseg.start + wseg.end) / 2
+            
+            # Check if segment center is within this speaker's time
+            if d_start <= segment_center <= d_end:
                 text_from_whisper = wseg.text.strip()
-                logging.info(f"🔍 DEBUG Whisper raw text type: {type(text_from_whisper)}, len: {len(text_from_whisper)}, repr: {repr(text_from_whisper[:50])}")
                 texts.append(text_from_whisper)
+                used_whisper_segments.add(idx)  # Mark as used
 
         final_text = " ".join(texts).strip()
         if not final_text:

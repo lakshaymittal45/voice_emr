@@ -1,9 +1,10 @@
 import os
+import re
 import json
 import logging
-import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Tuple
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,7 @@ from app.transcription.transcribe import speaker_wise_transcription
 from app.llm.extract_notes import extract_clinical_notes
 from app.db.mysql_connection import get_mysql_connection
 from app.encryption.aes_encrypt import encrypt_text, decrypt_text
+from app.live.live_record import router as live_record_router
 
 # ------------------------------------------------------------------
 # Setup
@@ -64,35 +66,96 @@ logging.getLogger("torchaudio").setLevel(logging.WARNING)
 
 app = FastAPI(title="Voice EMR Backend")
 
+# CORS: read allowed origins from env var (comma-separated list)
+# Example in .env: CORS_ORIGINS=http://localhost:3000,https://yourdomain.com
+_cors_origins_raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+ALLOWED_ORIGINS = [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restrict in production
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
+# 🎙️ Live recording WebSocket router
+app.include_router(live_record_router)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "audio", "recordings")
+
+# ----------------------------------------------------------------
+# 📁 Central recordings folder
+# All patient audio (uploads + live recordings) goes here.
+# Configurable via PATIENT_CONVO_DIR env var; defaults to D:\Patient Convo
+# ----------------------------------------------------------------
+UPLOAD_DIR = os.getenv("PATIENT_CONVO_DIR", r"D:\Patient Convo")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+logger.info(f"Patient recordings directory: {UPLOAD_DIR}")
+
+# ------------------------------------------------------------------
+# Input validation helpers
+# ------------------------------------------------------------------
+
+# Allowed characters for patient_id and clinician: alphanumeric, spaces, hyphens,
+# dots, underscores, and common name punctuation.  Max 100 chars.
+_IDENT_RE = re.compile(r'^[\w\s\-\.]{1,100}$')
+
+def _validate_identifier(value: str, field_name: str) -> str:
+    """Strip, length-check and character-validate a patient/clinician identifier.
+    Raises HTTPException 400 on invalid input.
+    """
+    value = (value or "").strip()
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{field_name} is required")
+    if len(value) > 100:
+        raise HTTPException(status_code=400, detail=f"{field_name} too long (max 100 chars)")
+    if not _IDENT_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field_name} contains invalid characters. Use letters, numbers, spaces, hyphens, dots, underscores only."
+        )
+    return value
 
 # ------------------------------------------------------------------
 # Constants for robustness
 # ------------------------------------------------------------------
-MAX_FILE_SIZE_MB = 500  # Max audio file size in MB
+MAX_FILE_SIZE_MB = 1000  # Max audio file size in MB
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
 
 # Bulk upload limits
 MAX_BULK_FILES = 20  # Maximum files in one bulk upload
-MAX_BULK_TOTAL_SIZE_MB = 2000  # Maximum total size for bulk upload (2GB)
+MAX_BULK_TOTAL_SIZE_MB = 6000  # Maximum total size for bulk upload (2GB)
 MAX_BULK_TOTAL_SIZE_BYTES = MAX_BULK_TOTAL_SIZE_MB * 1024 * 1024
 
 # ------------------------------------------------------------------
 # Validation helpers
 # ------------------------------------------------------------------
 
-def validate_audio_file(file_path: str) -> tuple[bool, str]:
+def _build_upload_path(patient_id: str, suffix: str) -> str:
+    """
+    Build a deterministic file path:
+        <UPLOAD_DIR>/<patient_id_safe>_<YYYYMMDD_HHMMSS><suffix>
+
+    If the same patient uploads at the exact same second the file already
+    exists and we overwrite it (same recording, no duplicates).
+    Different second  →  new file alongside the old one.
+    """
+    # Sanitize patient_id for use in a filename (spaces → underscores, strip unsafe chars)
+    safe_id = re.sub(r'[^\w\-]', '_', patient_id).strip('_') or 'unknown'
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    filename = f"{safe_id}_{ts}{suffix}"
+    return os.path.join(UPLOAD_DIR, filename)
+
+
+def _save_upload(path: str, content: bytes) -> None:
+    """Write audio bytes to *path*, overwriting if it already exists."""
+    with open(path, "wb") as f:
+        f.write(content)
+
+
+def validate_audio_file(file_path: str) -> Tuple[bool, str]:
     """Validate audio file format and integrity.
     Returns (is_valid, error_message)
     """
@@ -169,11 +232,6 @@ def process_audio_pipeline(audio_id: int, audio_path: str):
 
         # 4️⃣ Encrypt transcript
         logger.info(f"[{audio_id}] Step 4/4: Encryption & DB storage...")
-        
-        # 🔍 DEBUG: Log first segment before encryption
-        if speaker_transcript and len(speaker_transcript) > 0:
-            logger.info(f"🔍 DEBUG Before encrypt - First segment: {speaker_transcript[0]}")
-        
         encrypted_transcript = encrypt_text(
             json.dumps(speaker_transcript, ensure_ascii=False),
             AES_KEY
@@ -280,6 +338,10 @@ async def upload_consultation_audio(
     audio: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
+    # 🔒 Validation 0: Sanitize identifiers
+    patient_id = _validate_identifier(patient_id, "patient_id")
+    clinician = _validate_identifier(clinician, "clinician")
+
     # 🔒 Validation 1: Check filename
     if not audio.filename:
         raise HTTPException(status_code=400, detail="Invalid audio file")
@@ -304,18 +366,16 @@ async def upload_consultation_audio(
             detail=f"File too large. Maximum size: {MAX_FILE_SIZE_MB}MB"
         )
 
-    # 🔒 Save file temporarily
+    # 🔒 Save file with PatientID_datetime naming (overwrites if same second)
     audio_path = None
     try:
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=suffix,
-            dir=UPLOAD_DIR
-        ) as tmp:
-            audio_path = tmp.name
-            tmp.write(audio_content)
-
-        logger.info(f"Audio saved at {audio_path} ({len(audio_content)} bytes)")
+        audio_path = _build_upload_path(patient_id, suffix)
+        already_existed = os.path.exists(audio_path)
+        _save_upload(audio_path, audio_content)
+        logger.info(
+            f"Audio {'overwritten' if already_existed else 'saved'}: "
+            f"{os.path.basename(audio_path)} ({len(audio_content)} bytes)"
+        )
 
         # 🔒 Validation 4: Verify audio format
         is_valid, error_msg = validate_audio_file(audio_path)
@@ -345,8 +405,8 @@ async def upload_consultation_audio(
                 (
                     patient_id,
                     clinician,
-                    datetime.utcnow(),
-                    audio_path,  # Store full path for reliability
+                    datetime.now(timezone.utc),
+                    audio_path,
                     ""
                 )
             )
@@ -400,6 +460,9 @@ async def upload_consultation_audio_bulk(
     audio_files: list[UploadFile] = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
+    # 🔒 Validation 0: Sanitize identifiers
+    patient_id = _validate_identifier(patient_id, "patient_id")
+    clinician = _validate_identifier(clinician, "clinician")
     """
     Bulk upload multiple consultation audio files.
     All files will be validated and queued for processing.
@@ -502,16 +565,15 @@ async def upload_consultation_audio_bulk(
         audio_path = None
         
         try:
-            # Save file
-            with tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix=file_info["suffix"],
-                dir=UPLOAD_DIR
-            ) as tmp:
-                audio_path = tmp.name
-                tmp.write(file_info["content"])
-            
-            logger.info(f"[Bulk {file_info['file_number']}/{len(audio_files)}] Saved: {file_info['filename']} ({len(file_info['content'])} bytes)")
+            # Save file with PatientID_datetime naming (overwrites if same second)
+            audio_path = _build_upload_path(patient_id, file_info["suffix"])
+            already_existed = os.path.exists(audio_path)
+            _save_upload(audio_path, file_info["content"])
+            logger.info(
+                f"[Bulk {file_info['file_number']}/{len(audio_files)}] "
+                f"{'Overwritten' if already_existed else 'Saved'}: "
+                f"{os.path.basename(audio_path)} ({len(file_info['content'])} bytes)"
+            )
             
             # Validate audio format
             is_valid, error_msg = validate_audio_file(audio_path)
@@ -547,7 +609,7 @@ async def upload_consultation_audio_bulk(
                     (
                         patient_id,
                         clinician,
-                        datetime.utcnow(),
+                        datetime.now(timezone.utc),
                         audio_path,
                         ""
                     )
@@ -624,21 +686,25 @@ async def upload_consultation_audio_bulk(
 
 @app.get("/consultation-status/{audio_id}")
 def consultation_status(audio_id: int):
-    conn = get_mysql_connection()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute(
-        """
-        SELECT transcript_encrypted
-        FROM audio_records
-        WHERE audio_id=%s
-        """,
-        (audio_id,)
-    )
-    row = cursor.fetchone()
-
-    cursor.close()
-    conn.close()
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT transcript_encrypted
+            FROM audio_records
+            WHERE audio_id=%s
+            """,
+            (audio_id,)
+        )
+        row = cursor.fetchone()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
     if not row:
         raise HTTPException(status_code=404, detail="Audio not found")
@@ -668,24 +734,26 @@ def consultation_status_batch(audio_ids: list[int]):
     if len(audio_ids) > 100:
         raise HTTPException(status_code=400, detail="Maximum 100 IDs per batch request")
     
-    conn = get_mysql_connection()
-    cursor = conn.cursor(dictionary=True)
-    
-    # Build safe parameterized query
-    placeholders = ",".join(["%s"] * len(audio_ids))
-    
-    cursor.execute(
-        f"""
-        SELECT audio_id, transcript_encrypted
-        FROM audio_records
-        WHERE audio_id IN ({placeholders})
-        """,
-        tuple(audio_ids)
-    )
-    
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        placeholders = ",".join(["%s"] * len(audio_ids))
+        cursor.execute(
+            f"""
+            SELECT audio_id, transcript_encrypted
+            FROM audio_records
+            WHERE audio_id IN ({placeholders})
+            """,
+            tuple(audio_ids)
+        )
+        rows = cursor.fetchall()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
     
     # Build results
     results = {}
@@ -733,37 +801,41 @@ async def get_consultation(
     if role not in ["doctor", "admin"]:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-    conn = get_mysql_connection()
-    cursor = conn.cursor(dictionary=True)
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT 
+                ar.audio_id,
+                ar.patient_id,
+                ar.handling_clinician,
+                ar.transcript_encrypted,
 
-    cursor.execute(
-        """
-        SELECT 
-            ar.audio_id,
-            ar.patient_id,
-            ar.handling_clinician,
-            ar.transcript_encrypted,
+                cn.chief_complaint,
+                cn.history_of_present_illness,
+                cn.associated_diseases,
+                cn.past_medical_history,
+                cn.drug_history,
+                cn.allergies,
+                cn.assessment,
+                cn.treatment_plan
 
-            cn.chief_complaint,
-            cn.history_of_present_illness,
-            cn.associated_diseases,
-            cn.past_medical_history,
-            cn.drug_history,
-            cn.allergies,
-            cn.assessment,
-            cn.treatment_plan
-
-        FROM audio_records ar
-        LEFT JOIN clinical_notes cn
-            ON ar.audio_id = cn.audio_id
-        WHERE ar.audio_id = %s
-        """,
-        (audio_id,)
-    )
-
-    record = cursor.fetchone()
-    cursor.close()
-    conn.close()
+            FROM audio_records ar
+            LEFT JOIN clinical_notes cn
+                ON ar.audio_id = cn.audio_id
+            WHERE ar.audio_id = %s
+            """,
+            (audio_id,)
+        )
+        record = cursor.fetchone()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
@@ -775,11 +847,6 @@ async def get_consultation(
     if encrypted and encrypted != "FAILED":
         decrypted = decrypt_text(encrypted, AES_KEY)
         transcript = json.loads(decrypted) if decrypted else []
-        
-        # 🔍 DEBUG: Log first segment to check encoding
-        if transcript and len(transcript) > 0:
-            logger.info(f"🔍 DEBUG First segment text: {transcript[0].get('text', 'N/A')[:100]}")
-            logger.info(f"🔍 DEBUG First segment bytes: {transcript[0].get('text', '').encode('utf-8')[:50]}")
 
     return {
         "audio_id": record["audio_id"],
@@ -958,6 +1025,101 @@ def get_models_status():
             detail=f"Failed to get model status: {str(e)}"
         )
 
+@app.get("/patients")
+def get_patients():
+    """Get list of all patients with their latest appointment info."""
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        query = """
+            SELECT 
+                patient_id,
+                MAX(time_of_capture) as last_appointment,
+                COUNT(*) as total_appointments,
+                MAX(handling_clinician) as last_clinician
+            FROM audio_records
+            GROUP BY patient_id
+            ORDER BY MAX(time_of_capture) DESC
+        """
+        
+        cursor.execute(query)
+        patients = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        # Format datetime for JSON
+        for patient in patients:
+            if patient['last_appointment']:
+                patient['last_appointment'] = patient['last_appointment'].isoformat()
+        
+        return {
+            "status": "success",
+            "count": len(patients),
+            "patients": patients
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch patients: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(e)}"
+        )
+
+@app.get("/patient/{patient_id}/appointments")
+def get_patient_appointments(patient_id: str):
+    """Get all appointments/consultations for a specific patient."""
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        query = """
+            SELECT 
+                audio_id,
+                patient_id,
+                handling_clinician,
+                time_of_capture,
+                audio_duration_seconds,
+                created_at
+            FROM audio_records
+            WHERE patient_id = %s
+            ORDER BY time_of_capture DESC
+        """
+        
+        cursor.execute(query, (patient_id,))
+        appointments = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        if not appointments:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No appointments found for patient: {patient_id}"
+            )
+        
+        # Format datetime for JSON
+        for appt in appointments:
+            if appt['time_of_capture']:
+                appt['time_of_capture'] = appt['time_of_capture'].isoformat()
+            if appt['created_at']:
+                appt['created_at'] = appt['created_at'].isoformat()
+        
+        return {
+            "status": "success",
+            "patient_id": patient_id,
+            "count": len(appointments),
+            "appointments": appointments
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to fetch appointments for {patient_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(e)}"
+        )
+
 @app.get("/")
 def root():
     """Root endpoint - API info."""
@@ -971,13 +1133,16 @@ def root():
             "automatic_model_fallback",
             "performance_monitoring"
         ],
-        "features": ["single_upload", "bulk_upload", "batch_status", "model_status"],
+        "features": ["live_recording", "single_upload", "bulk_upload", "batch_status", "patient_search", "model_status"],
         "endpoints": {
+            "live_record_ws": "/ws/live-record",
             "single_upload": "/upload-consultation-audio",
             "bulk_upload": "/upload-consultation-audio-bulk",
             "status": "/consultation-status/{audio_id}",
             "batch_status": "/consultation-status-batch",
             "retrieve": "/consultation/{audio_id}",
+            "patients": "/patients",
+            "patient_appointments": "/patient/{patient_id}/appointments",
             "health": "/health",
             "models_status": "/models/status"
         },

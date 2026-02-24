@@ -6,6 +6,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 export default function ProcessingPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
   const audioId = searchParams.get("audio_id");
   const role = searchParams.get("role") || "doctor";
@@ -18,7 +19,7 @@ export default function ProcessingPage() {
     intervalRef.current = setInterval(async () => {
       try {
         const res = await fetch(
-          `http://127.0.0.1:8000/consultation-status/${audioId}`
+          `${API_BASE}/consultation-status/${audioId}`
         );
 
         if (!res.ok) return;

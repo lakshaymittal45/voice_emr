@@ -10,6 +10,7 @@ export default function ConsultationPage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const router = useRouter();
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
   const audioId = params?.audioId;
   const role = searchParams.get("role") || "doctor";
@@ -30,7 +31,7 @@ export default function ConsultationPage() {
       try {
         setLoading(true);
         const res = await fetch(
-          `http://127.0.0.1:8000/consultation/${audioId}?role=${role}`
+          `${API_BASE}/consultation/${audioId}?role=${encodeURIComponent(role)}`
         );
         if (!res.ok) throw new Error("Failed to fetch consultation");
         setData(await res.json());
@@ -59,6 +60,22 @@ export default function ConsultationPage() {
 
   return (
     <>
+      {/* Print-Only Document Header */}
+      <div className="print-only-header">
+        <div className="print-facility">
+          <h1>Voice EMR System</h1>
+          <p>Electronic Medical Records - North India Healthcare</p>
+        </div>
+        <div className="print-metadata">
+          <p>Document ID: CONS-{audioId}</p>
+          <p>Generated: {new Date().toLocaleString('en-IN', { 
+            dateStyle: 'long', 
+            timeStyle: 'short',
+            timeZone: 'Asia/Kolkata'
+          })}</p>
+        </div>
+      </div>
+
       {/* Navbar */}
       <nav className="navbar">
         <div className="navbar-inner">

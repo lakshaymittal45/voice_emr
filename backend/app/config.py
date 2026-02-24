@@ -305,7 +305,7 @@ DIARIZATION_CONFIG = {
     "model": "pyannote/speaker-diarization-3.1",
     "embedding_model": "pyannote/wespeaker-voxceleb-resnet34-LM",  # Better embeddings
     "min_speakers": 1,
-    "max_speakers": 3,  # Doctor, Patient, (optional) Nurse
+    "max_speakers": 6,  # Doctor, Patient, (optional) Nurse
     "use_auth_token": True,
     "enhanced_preprocessing": True  # Apply noise reduction
 }

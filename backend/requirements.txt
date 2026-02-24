@@ -1,51 +1,74 @@
 
-# ---------------- CORE NUMERICAL ----------------
+# ==============================================================================
+# Voice EMR — Python Dependencies
+# ==============================================================================
+# Install:  pip install -r requirements.txt
+# Note: PyTorch must be installed BEFORE pyannote.audio to avoid conflicts.
+# ==============================================================================
+
+
+# ── Core Numerical ────────────────────────────────────────────────────────────
 numpy==1.26.4
 scipy>=1.10.0,<1.13.0
 
-# ---------------- PYTORCH STACK -----------------
+
+# ── PyTorch Stack ─────────────────────────────────────────────────────────────
+# For CPU-only install (recommended unless you have NVIDIA GPU):
+#   pip install torch==2.1.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+# For CUDA 11.8:
+#   pip install torch==2.1.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
 torch==2.1.2
 torchvision==0.16.2
 torchaudio==2.1.2
 
-# ---------------- AUDIO PROCESSING --------------
+
+# ── Audio Processing ──────────────────────────────────────────────────────────
 soundfile>=0.12.1
 librosa>=0.10.1
-pydub>=0.25.1           # Audio manipulation and format conversion
+pydub>=0.25.1           # Audio manipulation & format conversion
 noisereduce>=3.0.0      # AI-powered noise reduction for clinical environments
 
-# ---------------- TRANSCRIPTION -----------------
+
+# ── Transcription (Whisper) ───────────────────────────────────────────────────
 faster-whisper>=1.0.3
 sentencepiece>=0.1.99,<0.2.0
 
-# ---------------- DIARIZATION -------------------
+
+# ── Speaker Diarization (PyAnnote) ───────────────────────────────────────────
 pyannote.audio==3.1.1
 huggingface_hub>=0.19.0,<0.23.0
 lightning>=2.1.0,<2.3.0
 torchmetrics>=1.2.0,<1.4.0
 
-# ---------------- BACKEND API -------------------
-fastapi>=0.110.0
-uvicorn>=0.27.0
-python-multipart>=0.0.9
 
-# ---------------- DATABASE ----------------------
+# ── Backend API ───────────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+websockets>=12.0        # WebSocket support for live recording endpoint
+httpx>=0.27.0           # Async HTTP client (used by FastAPI test client)
+
+
+# ── Database ──────────────────────────────────────────────────────────────────
 mysql-connector-python>=8.2.0
-ibm-db>=3.2.0
-# ---------------- SECURITY ----------------------
+# ibm-db>=3.2.0         # Optional — IBM DB2 for hospital production deploy
+
+
+# ── Security / Encryption ─────────────────────────────────────────────────────
 pycryptodome>=3.20.0
 
-# ---------------- CONFIG & UTILS ----------------
+
+# ── Config & Utilities ────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 tqdm>=4.66.0
 pandas>=2.0.3
 requests>=2.31.0
 
-# ---------------- HARDWARE DETECTION -------------
-psutil>=5.9.0          # System resource monitoring
-GPUtil>=1.4.0          # GPU detection and monitoring
 
-# ---------------- TRANSLATION (Better than Romanization) ----
-googletrans==4.0.0rc1  # Google Translate API for natural translations
-                       # Converts "मेरे सिर में दर्द है" → "My head hurts"
-                       # Much better quality than indic-transliteration
+# ── Hardware Detection ────────────────────────────────────────────────────────
+psutil>=5.9.0           # System resource monitoring (CPU, RAM)
+GPUtil>=1.4.0           # NVIDIA GPU detection
+
+
+# ── Translation ───────────────────────────────────────────────────────────────
+googletrans==4.0.0rc1   # Google Translate: "मेरे सिर में दर्द है" → "My head hurts"

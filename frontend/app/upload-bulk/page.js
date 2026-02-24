@@ -6,6 +6,7 @@ import { uploadConsultationAudioBulk } from "@/lib/api";
 
 export default function UploadBulkPage() {
   const router = useRouter();
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
   const [audioFiles, setAudioFiles] = useState([]);
   const [patientId, setPatientId] = useState("");
@@ -56,7 +57,7 @@ export default function UploadBulkPage() {
       });
 
       const res = await fetch(
-        `http://127.0.0.1:8000/upload-consultation-audio-bulk?${params}`,
+        `${API_BASE}/upload-consultation-audio-bulk?${params}`,
         { method: "POST", body: formData }
       );
 

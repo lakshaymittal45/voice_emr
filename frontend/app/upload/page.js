@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 export default function UploadPage() {
   const router = useRouter();
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://127.0.0.1:8000";
 
   const [audio, setAudio] = useState(null);
   const [patientId, setPatientId] = useState("");
@@ -84,7 +85,7 @@ async function handleSubmit(e) {
     formData.append("audio", audio);
 
     const res = await fetch(
-      `http://127.0.0.1:8000/upload-consultation-audio?patient_id=${patientId}&clinician=${clinician}`,
+      `${API_BASE}/upload-consultation-audio?patient_id=${encodeURIComponent(patientId)}&clinician=${encodeURIComponent(clinician)}`,
       { method: "POST", body: formData }
     );
 

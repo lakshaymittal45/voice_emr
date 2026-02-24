@@ -78,16 +78,16 @@ def load_pipeline():
 # ------------------------------------------------------------------
 
 def map_speakers_to_roles(segments: List[Dict]) -> List[Dict]:
+    """Map pyannote speaker IDs to SPEAKER_00, SPEAKER_01, etc."""
     speaker_order = list(dict.fromkeys(seg["speaker"] for seg in segments))
     role_map = {}
 
-    if len(speaker_order) >= 1:
-        role_map[speaker_order[0]] = "Doctor"
-    if len(speaker_order) >= 2:
-        role_map[speaker_order[1]] = "Patient"
+    # Map speakers to numbered labels: SPEAKER_00, SPEAKER_01, SPEAKER_02, etc.
+    for idx, original_speaker in enumerate(speaker_order):
+        role_map[original_speaker] = f"SPEAKER_{idx:02d}"
 
     for seg in segments:
-        seg["speaker"] = role_map.get(seg["speaker"], "Unknown")
+        seg["speaker"] = role_map.get(seg["speaker"], "SPEAKER_UNKNOWN")
 
     return segments
 
@@ -121,7 +121,7 @@ def run_diarization(
     if info.duration < 5.0:
         logging.info("Audio too short for diarization, using single speaker fallback.")
         return [{
-            "speaker": "Doctor",
+            "speaker": "SPEAKER_00",
             "start": 0.0,
             "end": round(info.duration, 2)
         }]
@@ -137,7 +137,7 @@ def run_diarization(
         # Fallback to single speaker
         logging.warning("Using single speaker fallback due to diarization error")
         return [{
-            "speaker": "Doctor",
+            "speaker": "SPEAKER_00",
             "start": 0.0,
             "end": round(info.duration, 2)
         }]
@@ -156,7 +156,7 @@ def run_diarization(
     if len(segments) < 2:
         logging.warning("Only one speaker detected, using fallback.")
         return [{
-            "speaker": "Doctor",
+            "speaker": "SPEAKER_00",
             "start": 0.0,
             "end": round(info.duration, 2)
         }]
