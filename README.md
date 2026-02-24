@@ -230,14 +230,15 @@ voice_emr/
 ```
 ---
 ## 📡 API Endpoints
-POST` | `/consultation-status-batch` | Batch status check for multiple audio IDs |
+```
+| POST` | `/consultation-status-batch` | Batch status check for multiple audio IDs |
 | `GET` | `/consultation/{audio_id}` | Retrieve decrypted transcript + clinical notes |
 | `GET` | `/patients` | List all patients with appointment stats |
 | `GET` | `/patient/{patient_id}/appointments` | Get all appointments for a specific patient |
 | `GET` | `/models/status` | Hardware info & active model selection |
 | `GET` | `/health` | Health check endpoint |
 | `WS` | `/ws/live-record` | WebSocket live recording stream |
-
+```
 **Live recording** WebSocket params: `?patient_id=<id>&clinician_id=<id>&role=doctor`
 
 ### Doctor Dashboard Workflow
@@ -247,16 +248,18 @@ POST` | `/consultation-status-batch` | Batch status check for multiple audio IDs
 3. **View History**: GET `/patient/{patient_id}/appointments` returns all consultations
 4. **View Details**: Click any appointment → GET `/consultation/{audio_id}` for full transcript & notes
 5. **Export PDF**: Print button generates professional medical document with proper styling
+```
 | `GET` | `/consultation-status/{audio_id}` | Poll processing status |
 | `GET` | `/consultation/{audio_id}` | Retrieve decrypted transcript + clinical notes |
 | `GET` | `/models/status` | Hardware info & active model selection |
 | `WS` | `/ws/live-record` | WebSocket live recording stream |
-
+```
 **Live recording** WebSocket params: `?patient_id=<id>&clinician_id=<id>&role=doctor`
 
 ---
 
 ## 🔄 Pipeline Overview
+```
 Doctor–Patient Conversation
         ↓
 Audio Upload (Frontend)
@@ -280,10 +283,9 @@ AES-256 Encryption
 Database Storage (Encrypted Only)
         ↓
 Authorized Decryption (Doctor / Admin)
-
+```
 ---
 
-## � What's New in v2.0
 
 ### Doctor Dashboard
 A centralized hub for doctors to search and access patient records:
