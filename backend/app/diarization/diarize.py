@@ -97,10 +97,14 @@ def map_speakers_to_roles(segments: List[Dict]) -> List[Dict]:
 
 def run_diarization(
     audio_path: str,
-    min_duration: float = 0.7
+    min_duration: float = 0.3  # 🔥 REDUCED from 0.7s to 0.3s for better live recording
 ) -> List[Dict]:
     """
     Run speaker diarization with robust error handling.
+    
+    Args:
+        audio_path: Path to audio file
+        min_duration: Minimum segment duration in seconds (default 0.3s)
     """
 
     if not os.path.exists(audio_path):
@@ -110,7 +114,7 @@ def run_diarization(
     logging.info(f"Running diarization on {os.path.basename(audio_path)}")
 
     # --------------------------------------------------------------
-    # 🔥 EARLY EXIT: short audio → skip diarization
+    # 🔥 EARLY EXIT: very short audio → skip diarization
     # --------------------------------------------------------------
     try:
         import soundfile as sf
@@ -118,8 +122,9 @@ def run_diarization(
     except Exception as e:
         raise RuntimeError(f"Failed to read audio info: {e}")
 
-    if info.duration < 5.0:
-        logging.info("Audio too short for diarization, using single speaker fallback.")
+    # 🔥 REDUCED: 5.0s → 3.0s for faster live transcription feedback
+    if info.duration < 3.0:
+        logging.info(f"Audio too short ({info.duration:.1f}s < 3.0s) for diarization, using single speaker fallback.")
         return [{
             "speaker": "SPEAKER_00",
             "start": 0.0,
@@ -153,8 +158,9 @@ def run_diarization(
                 "end": round(turn.end, 2)
             })
 
-    if len(segments) < 2:
-        logging.warning("Only one speaker detected, using fallback.")
+    # ⚠️ FIXED: One speaker is valid! Only use fallback if NO segments
+    if len(segments) == 0:
+        logging.warning("No speaker segments detected, using single speaker fallback.")
         return [{
             "speaker": "SPEAKER_00",
             "start": 0.0,

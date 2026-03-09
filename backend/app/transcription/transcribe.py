@@ -549,7 +549,11 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
     except Exception as e:
         raise RuntimeError(f"Failed to read audio file info: {e}")
     
-    use_vad = duration > 15.0
+    # 🔥 CRITICAL: Disable VAD by default - it's too aggressive and filters out real speech
+    # VAD (Voice Activity Detection) often mistakes accented speech, low-volume recordings,
+    # or certain languages as "silence" and drops them entirely
+    # Enable VAD only for very long audio (>60s) where speed matters
+    use_vad = duration > 60.0  # Changed from 15.0 to 60.0
 
     # Get best available model
     model, model_name = get_whisper_model(preferred_model)
@@ -590,14 +594,15 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
             repetition_penalty=1.15,     # >1 discourages the same token again
             no_repeat_ngram_size=4,      # Block exact 4-gram repetition
 
-            # 🛡️ ANTI-HALLUCINATION: Tighter quality gates
-            compression_ratio_threshold=1.8,  # Default 2.4 is too lenient for Indic scripts
-            log_prob_threshold=-0.8,          # Reject low-confidence hallucinated segments
-            no_speech_threshold=0.5,          # Stricter silence detection
+            # 🛡️ ANTI-HALLUCINATION: Balanced quality gates
+            # ⚠️ RELAXED: Previous thresholds were TOO STRICT, causing valid speech to be rejected
+            compression_ratio_threshold=2.4,  # Default 2.4 (lenient - allows more real speech)
+            log_prob_threshold=-1.0,          # Relaxed from -0.8 (only reject very low confidence)
+            no_speech_threshold=0.6,          # Relaxed from 0.5 (less aggressive silence filtering)
 
             # 🛡️ ANTI-HALLUCINATION: Skip phantom text generated during silence
-            hallucination_silence_threshold=0.5,  # (seconds) — if a segment spans
-                                                  # a gap of >=0.5 s of silence, drop it
+            # ⚠️ DISABLED: Was causing too much valid speech to be dropped
+            # hallucination_silence_threshold=0.5,  # COMMENTED OUT - too aggressive
 
             condition_on_previous_text=False,  # Prevents looping on prev output
             word_timestamps=False,
@@ -605,9 +610,13 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
             # 🌐 Better language detection for multilingual audio
             language_detection_segments=4,  # Use 4 segments instead of 1
 
-            # VAD for longer audio
+            # VAD for longer audio (RELAXED PARAMETERS)
+            # ⚠️ VAD can be too aggressive - only use for very long recordings
             vad_filter=use_vad,
-            vad_parameters={"min_silence_duration_ms": 900} if use_vad else None,
+            vad_parameters={
+                "min_silence_duration_ms": 2000,  # Increased from 900ms to 2000ms (more lenient)
+                "threshold": 0.3  # Lower threshold = detect more speech (less aggressive filtering)
+            } if use_vad else None,
         )
 
         transcription_time = time.time() - start_time
@@ -632,20 +641,40 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
         result = list(segments)
         
         if not result:
-            logging.warning("⚠️ Whisper returned no segments")
+            logging.error("❌ CRITICAL: Whisper returned NO segments - audio might be too quiet, corrupted, or VAD filtered everything")
+            logging.error(f"   Audio info: duration={duration:.2f}s, path={audio_to_transcribe}")
+            logging.error(f"   VAD enabled: {use_vad}")
+            logging.error(f"   Language detected: {info.language} (confidence={info.language_probability:.2f})")
         else:
             logging.info(f"📝 Generated {len(result)} segments")
             
-            # 🔍 DEBUG: Save first segment to file to check encoding
+            # 🔍 ENHANCED DEBUG: Log all segments for analysis
+            logging.info("🔍 DEBUG: All segments from Whisper:")
+            for i, seg in enumerate(result[:10], 1):  # Show first 10 segments
+                logging.info(f"   Segment {i}: [{seg.start:.2f}s-{seg.end:.2f}s] '{seg.text}'")
+            if len(result) > 10:
+                logging.info(f"   ... and {len(result) - 10} more segments")
+            
+            # 🔍 DEBUG: Save all segments to file for detailed analysis
             if result and len(result) > 0:
                 import tempfile
-                debug_file = os.path.join(tempfile.gettempdir(), "whisper_debug.txt")
+                debug_file = os.path.join(tempfile.gettempdir(), "whisper_debug_full.txt")
                 try:
                     with open(debug_file, 'w', encoding='utf-8') as f:
-                        f.write(f"First segment text:\n{result[0].text}\n")
-                        f.write(f"Text bytes: {result[0].text.encode('utf-8')}\n")
-                        f.write(f"Text repr: {repr(result[0].text)}\n")
-                    logging.info(f"🔍 DEBUG: Whisper output saved to {debug_file}")
+                        f.write(f"Audio: {audio_to_transcribe}\n")
+                        f.write(f"Duration: {duration:.2f}s\n")
+                        f.write(f"Model: {model_name}\n")
+                        f.write(f"Language: {info.language} (confidence={info.language_probability:.2f})\n")
+                        f.write(f"VAD enabled: {use_vad}\n")
+                        f.write(f"Total segments: {len(result)}\n")
+                        f.write("\n" + "="*80 + "\n")
+                        for i, seg in enumerate(result, 1):
+                            f.write(f"\nSegment {i}:\n")
+                            f.write(f"  Time: {seg.start:.2f}s - {seg.end:.2f}s\n")
+                            f.write(f"  Text: {seg.text}\n")
+                            f.write(f"  Repr: {repr(seg.text)}\n")
+                            f.write(f"  Bytes: {seg.text.encode('utf-8', errors='replace')}\n")
+                    logging.info(f"🔍 DEBUG: Full Whisper output saved to {debug_file}")
                 except Exception as e:
                     logging.error(f"🔍 DEBUG: Failed to save debug file: {e}")
         

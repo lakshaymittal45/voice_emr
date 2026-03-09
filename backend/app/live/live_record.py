@@ -204,24 +204,53 @@ def _run_incremental_pipeline(wav_path: str) -> List[Dict]:
         import soundfile as sf
         info = sf.info(wav_path)
         logger.info(
-            f"🎙️ [Incremental] Processing {info.duration:.1f}s of audio"
+            f"🎙️ [Incremental] Processing {info.duration:.1f}s of audio | "
+            f"Sample rate: {info.samplerate}Hz | Channels: {info.channels}"
         )
 
+        # 1. Run diarization
         segments = run_diarization(wav_path)
         if not segments:
-            logger.warning("[Incremental] No diarization segments")
+            logger.warning(
+                "[Incremental] No diarization segments returned | "
+                f"Audio duration: {info.duration:.1f}s | "
+                "This may indicate very quiet audio or silence"
+            )
             return []
+        
+        logger.info(f"[Incremental] Diarization found {len(segments)} speaker segments")
 
+        # 2. Run transcription
         transcript = speaker_wise_transcription(
             audio_path=wav_path,
             diarization_segments=segments,
         )
+        
+        if not transcript:
+            logger.warning(
+                "[Incremental] Transcription returned no segments | "
+                f"Diarization had {len(segments)} segments | "
+                "Possible causes: VAD filtered all speech, audio too quiet, or language not detected"
+            )
+            return []
+        
         logger.info(
-            f"✅ [Incremental] Got {len(transcript or [])} transcript segments"
+            f"✅ [Incremental] Got {len(transcript)} transcript segments | "
+            f"Total text length: {sum(len(t.get('text', '')) for t in transcript)} chars"
         )
-        return transcript or []
+        
+        # 🔍 DEBUG: Log first segment for troubleshooting
+        if transcript:
+            first_seg = transcript[0]
+            logger.info(
+                f"   First segment: [{first_seg.get('start', 0):.1f}s-{first_seg.get('end', 0):.1f}s] "
+                f"Speaker: {first_seg.get('speaker', 'unknown')} | "
+                f"Text preview: '{first_seg.get('text', '')[:50]}...'"
+            )
+        
+        return transcript
     except Exception as e:
-        logger.warning(f"Incremental pipeline error: {e}")
+        logger.error(f"❌ Incremental pipeline error: {type(e).__name__}: {e}", exc_info=True)
         return []
 
 
@@ -414,40 +443,59 @@ async def live_record_ws(ws: WebSocket):
             # Convert accumulated audio to WAV for processing
             tmp_wav = wav_path + f".partial_{cycle}.wav"
             try:
+                logger.info(f"[Incremental #{cycle}] Converting {chunk_size} bytes to WAV: {tmp_wav}")
                 _webm_to_wav(bytes(audio_chunks), tmp_wav)
+                logger.info(f"[Incremental #{cycle}] WAV conversion successful")
             except Exception as e:
-                logger.warning(f"Incremental WAV conversion error: {e}")
+                logger.error(f"❌ [Incremental #{cycle}] WAV conversion failed: {type(e).__name__}: {e}", exc_info=True)
                 continue
 
             # Ensure minimum duration
             try:
                 import soundfile as sf
                 info = sf.info(tmp_wav)
+                logger.info(
+                    f"[Incremental #{cycle}] WAV file info: duration={info.duration:.2f}s, "
+                    f"sample_rate={info.samplerate}Hz, channels={info.channels}, "
+                    f"frames={info.frames}, size={os.path.getsize(tmp_wav)} bytes"
+                )
                 if info.duration < MIN_DURATION_FOR_TRANSCRIPTION:
-                    logger.info(
-                        f"   Skipped – only {info.duration:.1f}s "
-                        f"(need ≥ {MIN_DURATION_FOR_TRANSCRIPTION}s)"
+                    logger.warning(
+                        f"[Incremental #{cycle}] Skipped – only {info.duration:.1f}s "
+                        f"(need ≥ {MIN_DURATION_FOR_TRANSCRIPTION}s) | "
+                        f"Wait for more audio to accumulate"
                     )
                     os.remove(tmp_wav)
                     continue
-            except Exception:
+            except Exception as e:
+                logger.error(f"❌ [Incremental #{cycle}] Failed to read WAV info: {e}", exc_info=True)
                 if os.path.exists(tmp_wav):
                     os.remove(tmp_wav)
                 continue
 
             # Enhance audio before incremental transcription
             try:
+                logger.info(f"[Incremental #{cycle}] Enhancing audio quality...")
                 _enhance_wav(tmp_wav)
+                logger.info(f"[Incremental #{cycle}] Audio enhancement complete")
             except Exception as e:
-                logger.warning(f"Incremental enhancement skipped: {e}")
+                logger.warning(f"[Incremental #{cycle}] Enhancement skipped: {e}")
 
             await _send_json(ws, {"type": "status", "message": "Transcribing…"})
+            logger.info(f"[Incremental #{cycle}] Starting diarization + transcription pipeline...")
 
             try:
+                logger.info(f"[Incremental #{cycle}] Running diarization + transcription...")
                 transcript = await loop.run_in_executor(
                     None, _run_incremental_pipeline, tmp_wav
                 )
-                if transcript:
+                logger.info(f"[Incremental #{cycle}] Pipeline completed, got {len(transcript) if transcript else 0} segments")
+                
+                if transcript and len(transcript) > 0:
+                    logger.info(
+                        f"✅ [Incremental #{cycle}] SUCCESS! Sending {len(transcript)} segments to client | "
+                        f"Total chars: {sum(len(seg.get('text', '')) for seg in transcript)}"
+                    )
                     await _send_json(ws, {
                         "type": "transcript",
                         "data": transcript,
@@ -456,8 +504,31 @@ async def live_record_ws(ws: WebSocket):
                         "type": "status",
                         "message": "🔴 Recording…",
                     })
+                else:
+                    logger.warning(
+                        f"⚠️ [Incremental #{cycle}] No transcript generated | "
+                        f"Possible causes:\n"
+                        f"  1. Audio too quiet (check microphone volume)\n"
+                        f"  2. Only silence/background noise detected\n"
+                        f"  3. Diarization found no speakers\n"
+                        f"  4. Whisper filtered out all segments (VAD/quality thresholds)\n"
+                        f"  5. Language not detected or unsupported\n"
+                        f"Check logs above for specific error from diarization or transcription."
+                    )
+                    # Still send a status update so user knows system is working
+                    await _send_json(ws, {
+                        "type": "status",
+                        "message": "🔴 Recording… (no speech detected yet - speak louder?)",
+                    })
             except Exception as e:
-                logger.warning(f"Incremental transcription error: {e}")
+                logger.error(
+                    f"❌ [Incremental #{cycle}] Pipeline exception: {type(e).__name__}: {str(e)}",
+                    exc_info=True
+                )
+                await _send_json(ws, {
+                    "type": "status",
+                    "message": "🔴 Recording… (transcription error - check logs)",
+                })
             finally:
                 if os.path.exists(tmp_wav):
                     os.remove(tmp_wav)
