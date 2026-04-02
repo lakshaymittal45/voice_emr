@@ -594,6 +594,287 @@ body {
   }
 }
 
+@media print {
+  @page {
+    margin: 12mm 10mm 14mm 10mm;
+    size: A4;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-family: "Times New Roman", Georgia, serif !important;
+  }
+
+  .screen-report-content,
+  .navbar,
+  .back-to-top,
+  .loading-state,
+  .error-state {
+    display: none !important;
+  }
+
+  .print-only-header {
+    display: none !important;
+  }
+
+  .print-fixed-header {
+    display: block !important;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 6mm 10mm 3mm;
+    background: #ffffff;
+    border-bottom: 1px solid #cbd5e1;
+    z-index: 1000;
+  }
+
+  .print-fixed-header-inner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: #1e3a8a;
+    font-size: 9pt;
+  }
+
+  .print-fixed-title {
+    font-weight: 700;
+    letter-spacing: 0.2px;
+  }
+
+  .print-fixed-meta {
+    display: flex;
+    gap: 14px;
+    color: #64748b;
+    font-family: "Courier New", monospace;
+    font-size: 8pt;
+  }
+
+  .print-report-shell {
+    display: block !important;
+    padding-top: 18mm;
+    color: #111827;
+  }
+
+  .print-report-masthead {
+    display: grid;
+    grid-template-columns: 70px 1fr 70px;
+    gap: 12px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  .print-report-logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .print-report-logo-image {
+    max-width: 60px;
+    max-height: 60px;
+    object-fit: contain;
+  }
+
+  .print-report-center {
+    text-align: center;
+    color: #1e3a8a;
+  }
+
+  .print-report-center h1 {
+    margin: 0 0 3px;
+    font-size: 14pt;
+    line-height: 1.15;
+    font-weight: 700;
+  }
+
+  .print-report-center p {
+    margin: 0;
+    font-size: 8.5pt;
+    line-height: 1.2;
+  }
+
+  .print-report-titlebar {
+    margin: 8px 0 8px;
+    padding: 5px 8px;
+    border-top: 1.5px solid #1e3a8a;
+    border-bottom: 1.5px solid #1e3a8a;
+    text-align: center;
+  }
+
+  .print-report-title {
+    font-size: 11pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #1e3a8a;
+  }
+
+  .print-report-subtitle {
+    margin-top: 2px;
+    font-size: 8pt;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  .print-report-summary {
+    margin-bottom: 8px;
+    border: 1px solid #cbd5e1;
+    padding: 8px 10px;
+    page-break-inside: avoid;
+  }
+
+  .print-summary-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 14px;
+  }
+
+  .print-summary-item {
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 4px;
+  }
+
+  .print-summary-label {
+    display: block;
+    font-size: 8pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #64748b;
+    letter-spacing: 0.5px;
+  }
+
+  .print-summary-value {
+    display: block;
+    margin-top: 2px;
+    font-size: 10pt;
+    color: #111827;
+  }
+
+  .print-report-section {
+    margin-top: 8px;
+    page-break-inside: auto;
+  }
+
+  .print-report-section-compact {
+    page-break-inside: avoid;
+  }
+
+  .print-section-heading {
+    margin-bottom: 6px;
+    padding-bottom: 3px;
+    border-bottom: 1px solid #cbd5e1;
+    color: #1e3a8a;
+    font-size: 11pt;
+    font-weight: 700;
+  }
+
+  .print-notes-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 10px;
+  }
+
+  .print-note-card {
+    border: 1px solid #e2e8f0;
+    padding: 6px 8px;
+    page-break-inside: avoid;
+  }
+
+  .print-note-label {
+    font-size: 8pt;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #64748b;
+    font-weight: 700;
+    margin-bottom: 2px;
+  }
+
+  .print-note-value {
+    font-size: 9.5pt;
+    line-height: 1.35;
+  }
+
+  .print-transcript-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .print-transcript-item {
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 5px;
+    page-break-inside: avoid;
+  }
+
+  .print-transcript-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: baseline;
+    margin-bottom: 2px;
+  }
+
+  .print-transcript-speaker {
+    font-size: 9pt;
+    font-weight: 700;
+    color: #111827;
+  }
+
+  .print-transcript-time,
+  .print-transcript-confidence {
+    font-size: 7.8pt;
+    color: #64748b;
+    font-family: "Courier New", monospace;
+  }
+
+  .print-transcript-text {
+    font-size: 9.2pt;
+    line-height: 1.28;
+    color: #111827;
+  }
+
+  .print-transcript-native {
+    margin-top: 1px;
+    font-size: 8.7pt;
+    line-height: 1.22;
+    color: #475569;
+  }
+
+  .print-signature-block {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid #cbd5e1;
+    page-break-inside: avoid;
+  }
+
+  .print-signature-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 18px;
+  }
+
+  .print-signature-col {
+    padding-top: 24px;
+  }
+
+  .print-signature-line {
+    border-top: 1px solid #64748b;
+    margin-bottom: 4px;
+  }
+
+  .print-signature-label {
+    font-size: 8pt;
+    color: #64748b;
+    text-align: center;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+}
+
 /* ===============================
    SECTIONS (Transcript / Notes)
 ================================ */
@@ -1150,53 +1431,216 @@ body {
   display: none;
 }
 
+.print-fixed-header,
+.print-report-shell {
+  display: none;
+}
+
 @media print {
   /* ===== PAGE SETUP ===== */
   @page {
-    margin: 2cm 1.5cm 2.5cm 1.5cm;
+    margin: 1.1cm 1cm 1.4cm 1cm;
     size: A4;
   }
 
   /* ===== PRINT-ONLY DOCUMENT HEADER ===== */
   .print-only-header {
     display: block !important;
-    margin-bottom: 30px;
-    padding-bottom: 20px;
-    border-bottom: 3px double #1e40af;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #163a9a;
+  }
+
+  .print-brand-strip {
+    display: grid;
+    grid-template-columns: 74px 1fr 74px;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+
+  .print-logo-slot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 68px;
+  }
+
+  .print-logo-image {
+    max-width: 64px;
+    max-height: 64px;
+    object-fit: contain;
   }
 
   .print-facility {
     text-align: center;
-    margin-bottom: 15px;
   }
 
   .print-facility h1 {
-    font-size: 18pt;
+    font-size: 14pt;
     font-weight: bold;
-    color: #1e40af;
-    margin: 0 0 5px 0;
-    letter-spacing: 1px;
-    font-family: "Arial", "Helvetica", sans-serif !important;
+    color: #142f8f;
+    margin: 0 0 3px 0;
+    line-height: 1.15;
+    letter-spacing: 0.2px;
+    font-family: "Times New Roman", "Georgia", serif !important;
   }
 
-  .print-facility p {
-    font-size: 10pt;
-    color: #475569;
+  .print-facility-line {
+    font-size: 8.6pt;
+    color: #132d87;
     margin: 0;
-    font-style: italic;
+    font-family: "Times New Roman", "Georgia", serif !important;
+  }
+
+  .print-facility-line-hi {
+    font-size: 9pt;
+  }
+
+  .print-document-ribbon {
+    border-top: 1.5px solid #163a9a;
+    border-bottom: 1.5px solid #163a9a;
+    text-align: center;
+    padding: 4px 8px;
+    margin-top: 4px;
+    font-family: "Times New Roman", "Georgia", serif !important;
+    font-size: 11pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #163a9a;
+    background: #f8fbff;
   }
 
   .print-metadata {
     display: flex;
     justify-content: space-between;
-    margin-top: 10px;
-    font-size: 9pt;
-    color: #64748b;
+    align-items: center;
+    margin-top: 6px;
+    font-size: 8pt;
+    color: #475569;
   }
 
   .print-metadata p {
     margin: 0;
     font-family: "Courier New", monospace;
+  }
+
+  .consultation-report-page {
+    padding-top: 0 !important;
+  }
+
+  .consultation-summary-card {
+    border: 1.5px solid #163a9a !important;
+    padding: 12px 14px 10px !important;
+    margin-bottom: 12px !important;
+    break-inside: avoid;
+    page-break-inside: avoid;
+    position: relative;
+    background: #ffffff !important;
+    page-break-before: auto !important;
+  }
+
+  .consultation-summary-card::before {
+    content: "MEDICAL CONSULTATION RECORD";
+    display: block;
+    text-align: center;
+    font-family: "Times New Roman", "Georgia", serif !important;
+    font-size: 13pt;
+    color: #163a9a;
+    font-weight: 700;
+    letter-spacing: 1px;
+    margin-bottom: 10px;
+    padding-bottom: 5px;
+    border-bottom: 2px solid #163a9a;
+  }
+
+  .consultation-summary-card .info-row {
+    gap: 0 !important;
+  }
+
+  .consultation-summary-card .info-item {
+    border-bottom: 1px solid #cfd8e7;
+    padding: 7px 0 8px;
+    min-width: 46%;
+  }
+
+  .consultation-summary-card .info-label {
+    font-size: 9pt !important;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #5b6887 !important;
+    font-weight: 700;
+  }
+
+  .consultation-summary-card .info-value {
+    font-size: 10.5pt !important;
+    color: #111827 !important;
+    margin-top: 3px;
+    font-family: "Times New Roman", "Georgia", serif !important;
+  }
+
+  .section-title {
+    color: #163a9a !important;
+    border-bottom: 1px solid #c8d6f0 !important;
+    padding-bottom: 4px;
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  .transcript-box-enhanced,
+  .notes-box-enhanced {
+    border: 1px solid #d7deeb !important;
+    border-radius: 0 !important;
+    background: #fff !important;
+  }
+
+  .transcript-line-enhanced,
+  .notes-item-enhanced,
+  .notes-category {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .notes-title,
+  .category-title {
+    color: #163a9a !important;
+    font-family: "Times New Roman", "Georgia", serif !important;
+  }
+
+  .category-icon,
+  .speaker-badge {
+    display: none !important;
+  }
+
+  .transcript-header-enhanced {
+    border-bottom: 1px solid #dde4ef;
+  }
+
+  .transcript-text-enhanced,
+  .notes-value-enhanced {
+    color: #111827 !important;
+  }
+
+  .transcript-content {
+    padding-top: 4px;
+  }
+
+  .info-card-enhanced::after {
+    content: "CONFIDENTIAL MEDICAL RECORD - Authorized Personnel Only";
+    display: block;
+    margin-top: 15px;
+    padding-top: 10px;
+    border-top: 1px solid #cbd5e1;
+    font-size: 8pt;
+    color: #b91c1c;
+    text-align: center;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .print-facility p {
+    margin: 0;
   }
 
   /* Reset body for print */
@@ -1214,6 +1658,7 @@ body {
   .app-heading,
   .tab-navigation,
   .transcript-controls,
+  .consultation-word-legend,
   .transcript-stats,
   .transcript-filters,
   .export-dropdown,
@@ -1242,8 +1687,8 @@ body {
   .info-card-enhanced {
     border: 2px solid #1e40af;
     border-radius: 0;
-    padding: 20px;
-    margin-bottom: 30px;
+    padding: 12px;
+    margin-bottom: 12px;
     background: #f8fafc !important;
     page-break-after: avoid;
   }
@@ -1252,11 +1697,11 @@ body {
     content: "MEDICAL CONSULTATION RECORD";
     display: block;
     text-align: center;
-    font-size: 16pt;
+    font-size: 13pt;
     font-weight: bold;
     color: #1e40af;
-    margin-bottom: 15px;
-    padding-bottom: 10px;
+    margin-bottom: 8px;
+    padding-bottom: 5px;
     border-bottom: 2px solid #1e40af;
     letter-spacing: 2px;
   }
@@ -1264,14 +1709,14 @@ body {
   .info-row {
     display: grid !important;
     grid-template-columns: 1fr 1fr !important;
-    gap: 15px !important;
-    margin-top: 10px;
+    gap: 10px !important;
+    margin-top: 4px;
   }
 
   .info-item {
     display: flex !important;
     flex-direction: column !important;
-    padding: 8px 0 !important;
+    padding: 5px 0 !important;
     border-bottom: 1px solid #cbd5e1 !important;
   }
 
@@ -1285,14 +1730,15 @@ body {
   }
 
   .info-value {
-    font-size: 11pt !important;
+    font-size: 10pt !important;
     font-weight: 500 !important;
     color: #0f172a !important;
   }
 
   /* ===== SECTION HEADERS ===== */
   .section {
-    page-break-inside: avoid;
+    page-break-inside: auto;
+    margin-top: 8px !important;
   }
 
   .section-title,
@@ -1301,9 +1747,9 @@ body {
     font-family: "Arial", "Helvetica", sans-serif !important;
     color: #1e40af !important;
     font-weight: bold !important;
-    margin-top: 25px !important;
-    margin-bottom: 15px !important;
-    padding-bottom: 8px !important;
+    margin-top: 10px !important;
+    margin-bottom: 8px !important;
+    padding-bottom: 4px !important;
     border-bottom: 2px solid #cbd5e1 !important;
     page-break-after: avoid !important;
   }
@@ -1320,9 +1766,9 @@ body {
     font-size: 12pt !important;
     color: #334155 !important;
     font-weight: 600 !important;
-    margin-top: 20px !important;
-    margin-bottom: 12px !important;
-    padding: 8px 12px !important;
+    margin-top: 10px !important;
+    margin-bottom: 8px !important;
+    padding: 6px 10px !important;
     background: #f1f5f9 !important;
     border-left: 4px solid #3b82f6 !important;
     page-break-after: avoid !important;
@@ -1345,8 +1791,8 @@ body {
   .transcript-line-enhanced {
     break-inside: avoid;
     page-break-inside: avoid;
-    margin-bottom: 15px !important;
-    padding: 12px 15px !important;
+    margin-bottom: 8px !important;
+    padding: 8px 10px !important;
     border: 1px solid #cbd5e1 !important;
     border-left: 4px solid #3b82f6 !important;
     background: #ffffff !important;
@@ -1367,8 +1813,8 @@ body {
     display: flex !important;
     justify-content: space-between !important;
     align-items: center !important;
-    margin-bottom: 8px !important;
-    padding-bottom: 6px !important;
+    margin-bottom: 4px !important;
+    padding-bottom: 4px !important;
     border-bottom: 1px solid #e2e8f0 !important;
   }
 
@@ -1406,8 +1852,8 @@ body {
   }
 
   .transcript-text-enhanced {
-    font-size: 11pt !important;
-    line-height: 1.7 !important;
+    font-size: 9.5pt !important;
+    line-height: 1.45 !important;
     color: #1e293b !important;
     overflow: visible !important;
     max-height: none !important;
@@ -1427,20 +1873,20 @@ body {
   }
 
   .notes-header {
-    margin-bottom: 20px !important;
+    margin-bottom: 10px !important;
   }
 
   .notes-category {
     break-inside: avoid;
     page-break-inside: avoid;
-    margin-bottom: 25px !important;
+    margin-bottom: 12px !important;
   }
 
   .notes-item-enhanced {
     break-inside: avoid;
     page-break-inside: avoid;
-    margin-bottom: 15px !important;
-    padding: 12px 15px !important;
+    margin-bottom: 8px !important;
+    padding: 8px 10px !important;
     background: #ffffff !important;
     border: 1px solid #cbd5e1 !important;
     border-radius: 0 !important;
@@ -1450,7 +1896,7 @@ body {
     display: flex !important;
     justify-content: space-between !important;
     align-items: center !important;
-    margin-bottom: 8px !important;
+    margin-bottom: 4px !important;
   }
 
   .notes-label-enhanced {
@@ -1463,25 +1909,10 @@ body {
   }
 
   .notes-value-enhanced {
-    font-size: 11pt !important;
-    line-height: 1.7 !important;
+    font-size: 9.5pt !important;
+    line-height: 1.45 !important;
     color: #1e293b !important;
     white-space: pre-wrap !important;
-  }
-
-  /* ===== PAGE FOOTER (APPEARS ON EVERY PAGE) ===== */
-  .page-wrapper::after {
-    content: "";
-    display: block;
-    position: fixed;
-    bottom: 1cm;
-    left: 1.5cm;
-    right: 1.5cm;
-    padding-top: 10px;
-    border-top: 1px solid #cbd5e1;
-    font-size: 8pt;
-    color: #64748b;
-    text-align: center;
   }
 
   /* Add document metadata footer */
@@ -1537,7 +1968,7 @@ body {
 
   /* Page breaks */
   .section + .section {
-    page-break-before: always;
+    page-break-before: auto;
   }
 
   /* Ensure first page has proper spacing */

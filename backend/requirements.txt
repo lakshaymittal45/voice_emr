@@ -18,20 +18,28 @@ scipy>=1.10.0,<1.13.0
 # For CUDA 11.8:
 #   pip install torch==2.1.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
 torch==2.1.2
-torchvision==0.16.2
 torchaudio==2.1.2
 
 
 # ── Audio Processing ──────────────────────────────────────────────────────────
 soundfile>=0.12.1
 librosa>=0.10.1
-pydub>=0.25.1           # Audio manipulation & format conversion
 noisereduce>=3.0.0      # AI-powered noise reduction for clinical environments
 
 
 # ── Transcription (Whisper) ───────────────────────────────────────────────────
 faster-whisper>=1.0.3
 sentencepiece>=0.1.99,<0.2.0
+ai4bharat-transliteration==0.5.0.2
+
+# Optional local Indic ASR backend:
+# AI4Bharat IndicConformer models currently require the AI4Bharat NeMo fork.
+# Install that manually when using TRANSCRIPTION_BACKEND=indicconformer.
+# Example:
+#   git clone https://github.com/AI4Bharat/NeMo.git
+#   cd NeMo
+#   git checkout nemo-v2
+#   bash reinstall.sh
 
 
 # ── Speaker Diarization (PyAnnote) ───────────────────────────────────────────
@@ -60,9 +68,9 @@ pycryptodome>=3.20.0
 
 # ── Config & Utilities ────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
-tqdm>=4.66.0
-pandas>=2.0.3
-requests>=2.31.0
+pandas>=2.0.3          # Required by pyannote.database at runtime
+requests>=2.31.0       # Required by huggingface_hub/faster-whisper stack
+tqdm>=4.66.0           # Required by faster-whisper progress/runtime utilities
 
 
 # ── Hardware Detection ────────────────────────────────────────────────────────
@@ -70,5 +78,3 @@ psutil>=5.9.0           # System resource monitoring (CPU, RAM)
 GPUtil>=1.4.0           # NVIDIA GPU detection
 
 
-# ── Translation ───────────────────────────────────────────────────────────────
-googletrans==4.0.0rc1   # Google Translate: "मेरे सिर में दर्द है" → "My head hurts"

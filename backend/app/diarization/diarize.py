@@ -2,8 +2,20 @@ import os
 import json
 import torch
 import logging
+import tempfile
 from typing import List, Dict, Optional
 from pyannote.audio import Pipeline
+import soundfile as sf
+
+try:
+    import librosa
+except ImportError:
+    librosa = None
+
+try:
+    from app.config import DIARIZATION_MERGE_GAP_SEC
+except ImportError:
+    DIARIZATION_MERGE_GAP_SEC = 0.35
 
 # ------------------------------------------------------------------
 # Setup
@@ -30,6 +42,43 @@ DEVICE = torch.device("cpu")
 
 PIPELINE = None
 PIPELINE_LOAD_ERROR = None
+
+
+def _prepare_audio_for_diarization(audio_path: str) -> str:
+    """
+    Normalize audio into mono 16 kHz PCM WAV for pyannote stability.
+    Returns the original path when no conversion is needed.
+    """
+    if librosa is None:
+        return audio_path
+
+    try:
+        audio, sample_rate = librosa.load(audio_path, sr=None, mono=True)
+        if audio is None or len(audio) == 0:
+            return audio_path
+
+        needs_conversion = (
+            sample_rate != 16000
+            or audio_path.lower().endswith((".mp3", ".m4a", ".ogg", ".webm", ".flac"))
+        )
+
+        if not needs_conversion:
+            return audio_path
+
+        if sample_rate != 16000:
+            audio = librosa.resample(audio, orig_sr=sample_rate, target_sr=16000)
+            sample_rate = 16000
+
+        temp_path = os.path.join(
+            tempfile.gettempdir(),
+            f"voice_emr_diarization_{os.path.basename(audio_path)}.wav",
+        )
+        sf.write(temp_path, audio, sample_rate, subtype="PCM_16")
+        logging.info("Prepared normalized audio for diarization: %s", os.path.basename(temp_path))
+        return temp_path
+    except Exception as exc:
+        logging.warning("Could not normalize audio for diarization, using original file: %s", exc)
+        return audio_path
 
 # ------------------------------------------------------------------
 # Load diarization pipeline (singleton with error caching)
@@ -91,6 +140,67 @@ def map_speakers_to_roles(segments: List[Dict]) -> List[Dict]:
 
     return segments
 
+
+def _merge_adjacent_same_speaker_segments(
+    segments: List[Dict],
+    max_gap: float = DIARIZATION_MERGE_GAP_SEC,
+) -> List[Dict]:
+    if not segments:
+        return segments
+
+    ordered = sorted(segments, key=lambda seg: (seg["start"], seg["end"], seg["speaker"]))
+    merged = [ordered[0].copy()]
+
+    for current in ordered[1:]:
+        previous = merged[-1]
+        gap = current["start"] - previous["end"]
+
+        if (
+            current["speaker"] == previous["speaker"]
+            and gap >= 0
+            and gap <= max_gap
+        ):
+            previous["end"] = round(max(previous["end"], current["end"]), 2)
+            continue
+
+        merged.append(current.copy())
+
+    return merged
+
+
+def _annotate_segment_overlaps(segments: List[Dict]) -> List[Dict]:
+    if not segments:
+        return segments
+
+    ordered = sorted(segments, key=lambda seg: (seg["start"], seg["end"], seg["speaker"]))
+    annotated = []
+
+    for index, segment in enumerate(ordered):
+        overlap_speakers = set()
+        segment_start = float(segment["start"])
+        segment_end = float(segment["end"])
+
+        for other_index, other in enumerate(ordered):
+            if index == other_index:
+                continue
+
+            other_start = float(other["start"])
+            other_end = float(other["end"])
+            overlap = max(0.0, min(segment_end, other_end) - max(segment_start, other_start))
+            if overlap > 0 and other["speaker"] != segment["speaker"]:
+                overlap_speakers.add(other["speaker"])
+
+        enriched = segment.copy()
+        if overlap_speakers:
+            enriched["overlap"] = True
+            enriched["overlap_speakers"] = sorted(overlap_speakers)
+        else:
+            enriched["overlap"] = False
+
+        annotated.append(enriched)
+
+    return annotated
+
 # ------------------------------------------------------------------
 # Run diarization
 # ------------------------------------------------------------------
@@ -116,9 +226,10 @@ def run_diarization(
     # --------------------------------------------------------------
     # 🔥 EARLY EXIT: very short audio → skip diarization
     # --------------------------------------------------------------
+    prepared_audio_path = _prepare_audio_for_diarization(audio_path)
+
     try:
-        import soundfile as sf
-        info = sf.info(audio_path)
+        info = sf.info(prepared_audio_path)
     except Exception as e:
         raise RuntimeError(f"Failed to read audio info: {e}")
 
@@ -136,7 +247,7 @@ def run_diarization(
     # --------------------------------------------------------------
     try:
         with torch.inference_mode():
-            diarization = PIPELINE(audio_path)
+            diarization = PIPELINE(prepared_audio_path)
     except Exception as e:
         logging.error(f"Diarization failed: {e}")
         # Fallback to single speaker
@@ -146,6 +257,12 @@ def run_diarization(
             "start": 0.0,
             "end": round(info.duration, 2)
         }]
+    finally:
+        if prepared_audio_path != audio_path and os.path.exists(prepared_audio_path):
+            try:
+                os.remove(prepared_audio_path)
+            except Exception:
+                pass
 
     segments: List[Dict] = []
 
@@ -168,6 +285,8 @@ def run_diarization(
         }]
 
     result = map_speakers_to_roles(segments)
+    result = _merge_adjacent_same_speaker_segments(result)
+    result = _annotate_segment_overlaps(result)
     logging.info(f"Diarization completed: {len(result)} segments")
     return result
 

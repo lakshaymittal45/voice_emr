@@ -12,9 +12,9 @@ from dotenv import load_dotenv
 import soundfile as sf
 
 # ---------------- INTERNAL IMPORTS ----------------
-from app.diarization.diarize import run_diarization
-from app.transcription.transcribe import speaker_wise_transcription
-from app.llm.extract_notes import extract_clinical_notes
+from app.transcription.offline_indic import hydrate_transcript_variants
+from app.transcription.transcribe import diarize_and_transcribe_audio
+from app.llm.extract_notes import extract_clinical_notes, _looks_non_clinical_transcript
 from app.db.mysql_connection import get_mysql_connection
 from app.encryption.aes_encrypt import encrypt_text, decrypt_text
 from app.live.live_record import router as live_record_router
@@ -30,6 +30,16 @@ if not AES_KEY or len(AES_KEY.encode("utf-8")) != 32:
     raise RuntimeError("EMR_AES_KEY must be set and exactly 32 bytes")
 
 AES_KEY = AES_KEY.encode("utf-8")
+
+
+def _to_utc_iso(dt_value):
+    if not dt_value:
+        return None
+    if getattr(dt_value, "tzinfo", None) is None:
+        dt_value = dt_value.replace(tzinfo=timezone.utc)
+    else:
+        dt_value = dt_value.astimezone(timezone.utc)
+    return dt_value.isoformat()
 
 # Custom filter to suppress repetitive status checks from logs
 class StatusCheckFilter(logging.Filter):
@@ -209,19 +219,12 @@ def process_audio_pipeline(audio_id: int, audio_path: str):
         if not is_valid:
             raise RuntimeError(f"Audio validation failed: {error_msg}")
 
-        # 1️⃣ Diarization
-        logger.info(f"[{audio_id}] Step 1/4: Diarization...")
-        segments = run_diarization(audio_path)
-        
+        # 1️⃣ + 2️⃣ Diarization and transcription
+        logger.info(f"[{audio_id}] Step 1/4: Diarization + Transcription...")
+        segments, speaker_transcript = diarize_and_transcribe_audio(audio_path)
+
         if not segments:
             raise RuntimeError("Diarization returned no segments")
-
-        # 2️⃣ Transcription
-        logger.info(f"[{audio_id}] Step 2/4: Transcription...")
-        speaker_transcript = speaker_wise_transcription(
-            audio_path=audio_path,
-            diarization_segments=segments
-        )
 
         if not speaker_transcript:
             raise RuntimeError("Empty speaker-wise transcript")
@@ -847,22 +850,29 @@ async def get_consultation(
     if encrypted and encrypted != "FAILED":
         decrypted = decrypt_text(encrypted, AES_KEY)
         transcript = json.loads(decrypted) if decrypted else []
+        if isinstance(transcript, list):
+            transcript = hydrate_transcript_variants(transcript)
+
+    clinical_notes = {
+        "chief_complaint": record["chief_complaint"],
+        "history_of_present_illness": record["history_of_present_illness"],
+        "associated_diseases": record["associated_diseases"],
+        "past_medical_history": record["past_medical_history"],
+        "drug_history": record["drug_history"],
+        "allergies": record["allergies"],
+        "assessment": record["assessment"],
+        "treatment_plan": record["treatment_plan"]
+    }
+
+    if isinstance(transcript, list) and _looks_non_clinical_transcript(transcript):
+        clinical_notes = {key: None for key in clinical_notes}
 
     return {
         "audio_id": record["audio_id"],
         "patient_id": record["patient_id"],
         "clinician": record["handling_clinician"],
         "transcript": transcript,
-        "clinical_notes": {
-            "chief_complaint": record["chief_complaint"],
-            "history_of_present_illness": record["history_of_present_illness"],
-            "associated_diseases": record["associated_diseases"],
-            "past_medical_history": record["past_medical_history"],
-            "drug_history": record["drug_history"],
-            "allergies": record["allergies"],
-            "assessment": record["assessment"],
-            "treatment_plan": record["treatment_plan"]
-        }
+        "clinical_notes": clinical_notes
     }
 
 # ------------------------------------------------------------------
@@ -1051,7 +1061,7 @@ def get_patients():
         # Format datetime for JSON
         for patient in patients:
             if patient['last_appointment']:
-                patient['last_appointment'] = patient['last_appointment'].isoformat()
+                patient['last_appointment'] = _to_utc_iso(patient['last_appointment'])
         
         return {
             "status": "success",
@@ -1100,9 +1110,9 @@ def get_patient_appointments(patient_id: str):
         # Format datetime for JSON
         for appt in appointments:
             if appt['time_of_capture']:
-                appt['time_of_capture'] = appt['time_of_capture'].isoformat()
+                appt['time_of_capture'] = _to_utc_iso(appt['time_of_capture'])
             if appt['created_at']:
-                appt['created_at'] = appt['created_at'].isoformat()
+                appt['created_at'] = _to_utc_iso(appt['created_at'])
         
         return {
             "status": "success",

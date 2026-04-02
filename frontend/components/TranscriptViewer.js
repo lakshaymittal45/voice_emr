@@ -1,13 +1,16 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 
 export default function TranscriptViewer({ transcript }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [speakerFilter, setSpeakerFilter] = useState("all");
   const [expandedItems, setExpandedItems] = useState(new Set());
 
-  // No transcript
+  const getDisplayText = (seg) => seg?.text_romanized || seg?.text || "-";
+  const hasWordConfidence = (seg) =>
+    Array.isArray(seg?.word_confidences) && seg.word_confidences.length > 0;
+
   if (!transcript || transcript.length === 0) {
     return (
       <div className="transcript-box">
@@ -16,7 +19,6 @@ export default function TranscriptViewer({ transcript }) {
     );
   }
 
-  // Fallback: plain string
   if (typeof transcript === "string") {
     return (
       <div className="transcript-box">
@@ -25,7 +27,6 @@ export default function TranscriptViewer({ transcript }) {
     );
   }
 
-  // Only handle array transcripts beyond this point
   if (!Array.isArray(transcript)) {
     return (
       <div className="transcript-box">
@@ -34,49 +35,50 @@ export default function TranscriptViewer({ transcript }) {
     );
   }
 
-  // Calculate statistics
   const stats = useMemo(() => {
-    const totalWords = transcript.reduce((sum, seg) => 
-      sum + (seg.text || "").split(/\s+/).filter(w => w).length, 0
+    const totalWords = transcript.reduce(
+      (sum, seg) => sum + getDisplayText(seg).split(/\s+/).filter((w) => w).length,
+      0
     );
-    const doctorCount = transcript.filter(s => s.speaker === "Doctor").length;
-    const patientCount = transcript.filter(s => s.speaker === "Patient").length;
-    const duration = transcript.length > 0 
-      ? transcript[transcript.length - 1].end - transcript[0].start 
-      : 0;
-    
+    const doctorCount = transcript.filter((s) => s.speaker === "Doctor").length;
+    const patientCount = transcript.filter((s) => s.speaker === "Patient").length;
+    const duration =
+      transcript.length > 0
+        ? transcript[transcript.length - 1].end - transcript[0].start
+        : 0;
+
     return { totalWords, doctorCount, patientCount, duration };
   }, [transcript]);
 
-  // Filter transcript
   const filteredTranscript = useMemo(() => {
     let filtered = transcript;
 
-    // Speaker filter
     if (speakerFilter !== "all") {
-      filtered = filtered.filter(seg => 
-        seg.speaker?.toLowerCase() === speakerFilter.toLowerCase()
+      filtered = filtered.filter(
+        (seg) => seg.speaker?.toLowerCase() === speakerFilter.toLowerCase()
       );
     }
 
-    // Search filter
     if (searchQuery.trim()) {
       const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(seg => 
-        seg.text?.toLowerCase().includes(query) ||
-        seg.speaker?.toLowerCase().includes(query)
+      filtered = filtered.filter(
+        (seg) =>
+          getDisplayText(seg).toLowerCase().includes(query) ||
+          seg.speaker?.toLowerCase().includes(query)
       );
     }
 
     return filtered;
   }, [transcript, speakerFilter, searchQuery]);
 
-  // Export functions
   const handleExport = (format) => {
     if (format === "txt") {
-      const text = transcript.map(seg => 
-        `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${seg.speaker}: ${seg.text}`
-      ).join("\n\n");
+      const text = transcript
+        .map(
+          (seg) =>
+            `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${seg.speaker}: ${getDisplayText(seg)}`
+        )
+        .join("\n\n");
       downloadFile(text, "transcript.txt", "text/plain");
     } else if (format === "json") {
       const json = JSON.stringify(transcript, null, 2);
@@ -85,9 +87,9 @@ export default function TranscriptViewer({ transcript }) {
   };
 
   const handleCopyAll = () => {
-    const text = transcript.map(seg => 
-      `${seg.speaker}: ${seg.text}`
-    ).join("\n\n");
+    const text = transcript
+      .map((seg) => `${seg.speaker}: ${getDisplayText(seg)}`)
+      .join("\n\n");
     navigator.clipboard.writeText(text);
     alert("Transcript copied to clipboard!");
   };
@@ -104,7 +106,6 @@ export default function TranscriptViewer({ transcript }) {
 
   return (
     <div className="transcript-box-enhanced">
-      {/* Control Bar */}
       <div className="transcript-controls">
         <div className="transcript-stats">
           <div className="stat-item">
@@ -122,7 +123,6 @@ export default function TranscriptViewer({ transcript }) {
         </div>
 
         <div className="transcript-filters">
-          {/* Search */}
           <div className="search-box">
             <input
               type="text"
@@ -132,19 +132,18 @@ export default function TranscriptViewer({ transcript }) {
               className="search-input"
             />
             {searchQuery && (
-              <button 
-                onClick={() => setSearchQuery("")} 
+              <button
+                onClick={() => setSearchQuery("")}
                 className="search-clear"
                 title="Clear search"
               >
-                ✕
+                x
               </button>
             )}
           </div>
 
-          {/* Speaker Filter */}
-          <select 
-            value={speakerFilter} 
+          <select
+            value={speakerFilter}
             onChange={(e) => setSpeakerFilter(e.target.value)}
             className="speaker-filter"
           >
@@ -153,20 +152,35 @@ export default function TranscriptViewer({ transcript }) {
             <option value="patient">Patient Only</option>
           </select>
 
-          {/* Export Dropdown */}
           <div className="export-dropdown">
-            <button className="export-btn">Export ▾</button>
+            <button className="export-btn">Export v</button>
             <div className="export-menu">
-              <button onClick={() => handleExport("txt")}>📄 Text File</button>
-              <button onClick={() => handleExport("json")}>📋 JSON</button>
-              <button onClick={handleCopyAll}>📋 Copy All</button>
-              <button onClick={() => window.print()}>🖨️ Print</button>
+              <button onClick={() => handleExport("txt")}>Text File</button>
+              <button onClick={() => handleExport("json")}>JSON</button>
+              <button onClick={handleCopyAll}>Copy All</button>
+              <button onClick={() => window.print()}>Print</button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Results Info */}
+      <div
+        className="consultation-word-legend"
+        style={{
+          display: "flex",
+          gap: "8px",
+          flexWrap: "wrap",
+          padding: "10px 18px 0",
+          fontSize: "12px",
+          color: "#475569",
+        }}
+      >
+        <span>Word confidence:</span>
+        <span style={confidenceLegendStyle("#dcfce7", "#166534")}>High</span>
+        <span style={confidenceLegendStyle("#fef3c7", "#92400e")}>Medium</span>
+        <span style={confidenceLegendStyle("#fee2e2", "#991b1b")}>Low</span>
+      </div>
+
       {searchQuery && (
         <div className="search-results-info">
           Showing {filteredTranscript.length} of {transcript.length} segments
@@ -174,67 +188,68 @@ export default function TranscriptViewer({ transcript }) {
         </div>
       )}
 
-      {/* Transcript Content */}
       <div className="transcript-content">
         {filteredTranscript.length === 0 ? (
           <p className="empty-text">No matching segments found.</p>
         ) : (
-          filteredTranscript.map((seg, index) => {
+          filteredTranscript.map((seg) => {
             const originalIndex = transcript.indexOf(seg);
             const isExpanded = expandedItems.has(originalIndex);
-            const isLongText = seg.text && seg.text.length > 300;
+            const displayText = getDisplayText(seg);
+            const isLongText = displayText.length > 300;
 
             return (
               <div
                 key={originalIndex}
                 className={`transcript-line-enhanced ${
-                  seg.speaker === "Doctor"
-                    ? "speaker-doctor"
-                    : "speaker-patient"
+                  seg.speaker === "Doctor" ? "speaker-doctor" : "speaker-patient"
                 }`}
               >
-                {/* Header */}
                 <div className="transcript-header-enhanced">
                   <div className="speaker-info">
                     <span className="speaker-badge">
-                      {seg.speaker === "Doctor" ? "👨‍⚕️" : "🧑"}
+                      {seg.speaker === "Doctor" ? "DR" : "SP"}
                     </span>
-                    <span className="speaker-name">
-                      {seg.speaker || "Speaker"}
-                    </span>
+                    <span className="speaker-name">{seg.speaker || "Speaker"}</span>
                     {seg.start != null && seg.end != null && (
                       <span className="timestamp-badge">
-                        {formatTime(seg.start)} → {formatTime(seg.end)}
+                        {formatTime(seg.start)} {"->"} {formatTime(seg.end)}
                       </span>
                     )}
                   </div>
 
                   {typeof seg.confidence === "number" && (
-                    <span 
+                    <span
                       className="confidence-badge"
-                      style={{
-                        background: getConfidenceColor(seg.confidence)
-                      }}
+                      style={{ background: getConfidenceColor(seg.confidence) }}
                     >
                       {(seg.confidence * 100).toFixed(0)}% confident
                     </span>
                   )}
                 </div>
 
-                {/* Text */}
-                <p className={`transcript-text-enhanced ${
-                  !isExpanded && isLongText ? "truncated" : ""
-                }`}>
-                  {highlightSearch(seg.text || "—", searchQuery)}
+                <p
+                  className={`transcript-text-enhanced ${
+                    !isExpanded && isLongText ? "truncated" : ""
+                  }`}
+                >
+                  {hasWordConfidence(seg) && !searchQuery.trim()
+                    ? renderWordConfidence(seg.word_confidences)
+                    : highlightSearch(displayText, searchQuery)}
                 </p>
 
-                {/* Expand/Collapse for long text */}
+                {seg.text_native && seg.text_native !== displayText && (
+                  <p className="transcript-text-enhanced" style={{ opacity: 0.68 }}>
+                    {seg.text_native}
+                  </p>
+                )}
+
                 {isLongText && (
-                  <button 
+                  <button
                     onClick={() => toggleExpand(originalIndex)}
                     className="expand-btn"
                   >
-                    {isExpanded ? "Show Less ▲" : "Show More ▼"}
+                    {isExpanded ? "Show Less ^" : "Show More v"}
                   </button>
                 )}
               </div>
@@ -245,8 +260,6 @@ export default function TranscriptViewer({ transcript }) {
     </div>
   );
 }
-
-/* ---------------- Helpers ---------------- */
 
 function formatTime(seconds = 0) {
   const m = Math.floor(seconds / 60);
@@ -262,23 +275,68 @@ function formatDuration(seconds = 0) {
 }
 
 function getConfidenceColor(confidence) {
-  if (confidence >= 0.9) return "#dcfce7"; // green
-  if (confidence >= 0.75) return "#fef3c7"; // yellow
-  return "#fee2e2"; // red
+  if (confidence >= 0.9) return "#dcfce7";
+  if (confidence >= 0.75) return "#fef3c7";
+  return "#fee2e2";
+}
+
+function getConfidenceTextColor(confidence) {
+  if (confidence >= 0.9) return "#166534";
+  if (confidence >= 0.75) return "#92400e";
+  return "#991b1b";
+}
+
+function confidenceLegendStyle(background, color) {
+  return {
+    background,
+    color,
+    padding: "2px 8px",
+    borderRadius: "999px",
+    fontWeight: 600,
+  };
+}
+
+function renderWordConfidence(words) {
+  return words.map((word, index) => {
+    const confidence =
+      typeof word?.confidence === "number" ? word.confidence : 0.75;
+    return (
+      <span
+        key={`${word?.start ?? "w"}-${index}`}
+        title={`${Math.round(confidence * 100)}% confidence`}
+        style={{
+          background: getConfidenceColor(confidence),
+          color: getConfidenceTextColor(confidence),
+          padding: "2px 4px",
+          borderRadius: "6px",
+          marginRight: "4px",
+          display: "inline-block",
+          marginBottom: "4px",
+        }}
+      >
+        {word?.text || ""}
+      </span>
+    );
+  });
 }
 
 function highlightSearch(text, query) {
   if (!query.trim()) return text;
-  
+
   const regex = new RegExp(`(${escapeRegex(query)})`, "gi");
   const parts = text.split(regex);
-  
-  return parts.map((part, i) => 
+
+  return parts.map((part, i) =>
     regex.test(part) ? (
-      <mark key={i} style={{ background: "#fef08a", padding: "2px 4px", borderRadius: "3px" }}>
+      <mark
+        key={i}
+        style={{ background: "#fef08a", padding: "2px 4px", borderRadius: "3px" }}
+      >
         {part}
       </mark>
-    ) : part
+    ) : (
+      part
+    )
   );
 }
 

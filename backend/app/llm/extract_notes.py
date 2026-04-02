@@ -81,6 +81,53 @@ EMPTY_CLINICAL_NOTE = {
     "treatment_plan": None
 }
 
+NON_CLINICAL_PATTERNS = [
+    r"^\s*$",
+    r"^[\d\s,.\-]+$",
+]
+
+NON_CLINICAL_PHRASES = {
+    "hello",
+    "hi",
+    "testing",
+    "test",
+    "one two three",
+    "1 2 3",
+    "123",
+    "kya haal hai",
+    "kaise ho",
+    "haan",
+    "hanji",
+    "theek hai",
+    "thik hai",
+    "acha",
+    "achha",
+}
+
+CLINICAL_CUES = {
+    "pain", "fever", "cough", "cold", "sugar", "diabetes", "bp", "pressure",
+    "vomit", "vomiting", "headache", "dizzy", "dizziness", "weakness", "weak",
+    "breath", "breathing", "asthma", "chest", "stomach", "abdomen", "infection",
+    "tablet", "medicine", "medication", "allergy", "allergies", "doctor",
+    "patient", "symptom", "symptoms", "days", "months", "years", "pregnant",
+    "injury", "fracture", "blood", "surgery", "insulin", "thyroid", "urine",
+    "bukhar", "khansi", "sar", "sir", "dard", "saans", "dawai", "davai",
+    "ulti", "chakkar", "pet", "sardi", "bukhaar", "sugar", "ghabrahat",
+    "khang", "dawaiyan", "allergy", "bukhar hai", "khansi hai", "dard hai",
+}
+
+ROLE_CUES = {
+    "doctor", "dr", "patient", "medicine", "prescription", "clinic", "hospital",
+    "test", "report", "symptom", "problem", "complaint", "tablet", "bp",
+    "sugar", "scan", "xray", "ultrasound", "follow up", "followup",
+}
+
+LYRIC_CUES = {
+    "mohabbat", "mahubat", "muhabbat", "pyaar", "pyar", "ishq", "dil", "darling",
+    "break up", "breakup", "sanam", "jana", "jaan", "yaar", "yaaron", "baby",
+    "mili", "mujhko", "mar jaunga", "mar jaunga", "give up", "love", "lover",
+}
+
 # ------------------------------------------------------------------
 # 🏥 Ollama Health Check (Enhanced)
 # ------------------------------------------------------------------
@@ -154,6 +201,24 @@ def check_model_availability(model_name: str) -> bool:
 # 🏥 Enhanced Medical Prompt Builder
 # ------------------------------------------------------------------
 
+def _format_segment_for_prompt(seg: Dict[str, str]) -> Optional[str]:
+    text = (seg.get("text") or "").strip()
+    if not text:
+        return None
+
+    native_text = (seg.get("text_native") or "").strip()
+    romanized_text = (seg.get("text_romanized") or "").strip()
+    speaker = seg.get("speaker") or "Speaker"
+
+    if native_text and native_text != text and native_text not in text:
+        return f"{speaker}: {text} [native: {native_text}]"
+
+    if romanized_text and romanized_text != text and romanized_text not in text:
+        return f"{speaker}: {text} [romanized: {romanized_text}]"
+
+    return f"{speaker}: {text}"
+
+
 def _build_prompt(speaker_transcript: List[Dict[str, str]], use_enhanced: bool = True) -> str:
     """
     Build medical-grade prompt with enhanced structure.
@@ -165,14 +230,22 @@ def _build_prompt(speaker_transcript: List[Dict[str, str]], use_enhanced: bool =
     Returns:
         Formatted prompt string
     """
-    conversation = "\n".join(
-        f"{seg['speaker']}: {seg['text']}"
-        for seg in speaker_transcript
-        if seg.get("text")
-    )
+    conversation_lines = []
+    for segment in speaker_transcript:
+        formatted = _format_segment_for_prompt(segment)
+        if formatted:
+            conversation_lines.append(formatted.strip())
+
+    conversation = "\n".join(line for line in conversation_lines if line)
 
     # Truncate to prevent timeout
-    conversation = conversation[:LLM_MAX_CHARS]
+    if len(conversation) > LLM_MAX_CHARS:
+        logger.warning(
+            "Transcript truncated for LLM prompt: %s -> %s chars",
+            len(conversation),
+            LLM_MAX_CHARS,
+        )
+        conversation = conversation[:LLM_MAX_CHARS]
 
     if USE_MEDICAL_CONFIG and use_enhanced:
         # Use enhanced medical template
@@ -207,6 +280,65 @@ treatment_plan
 Conversation:
 {conversation}
 """.strip()
+
+
+def _transcript_text_for_validation(speaker_transcript: List[Dict[str, str]]) -> str:
+    parts = []
+    for segment in speaker_transcript:
+        for key in ("text", "text_native", "text_romanized"):
+            value = (segment.get(key) or "").strip().lower()
+            if value:
+                parts.append(value)
+    return " ".join(parts)
+
+
+def _looks_non_clinical_transcript(speaker_transcript: List[Dict[str, str]]) -> bool:
+    combined = _transcript_text_for_validation(speaker_transcript)
+    if not combined:
+        return True
+
+    normalized = re.sub(r"[^\w\s]", " ", combined)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    if not normalized:
+        return True
+
+    for pattern in NON_CLINICAL_PATTERNS:
+        if re.fullmatch(pattern, normalized):
+            return True
+
+    word_count = len(normalized.split())
+    if normalized in NON_CLINICAL_PHRASES:
+        return True
+
+    clinical_cue_count = sum(1 for cue in CLINICAL_CUES if cue in normalized)
+    role_cue_count = sum(1 for cue in ROLE_CUES if cue in normalized)
+    lyric_cue_count = sum(1 for cue in LYRIC_CUES if cue in normalized)
+    speaker_count = len(
+        {
+            (segment.get("speaker") or "").strip()
+            for segment in speaker_transcript
+            if (segment.get("speaker") or "").strip()
+        }
+    )
+
+    # Reject short, greeting-like, or number-heavy audio before the LLM can hallucinate.
+    if word_count < 8 and clinical_cue_count == 0:
+        return True
+
+    # Reject likely songs/lyrics/monologues unless there is strong clinical evidence.
+    if lyric_cue_count >= 2 and clinical_cue_count < 3:
+        return True
+
+    # A single-speaker monologue without medical context is not a consultation.
+    if speaker_count <= 1 and clinical_cue_count < 3 and role_cue_count == 0:
+        return True
+
+    # Require stronger evidence before calling the LLM.
+    if clinical_cue_count < 2 and role_cue_count == 0:
+        return True
+
+    return False
 
 # ------------------------------------------------------------------
 # 🏥 Enhanced Ollama Runner with Intelligent Retry
@@ -431,6 +563,12 @@ def extract_clinical_notes(
 
     if not speaker_transcript:
         logger.warning("Empty transcript provided to LLM")
+        return EMPTY_CLINICAL_NOTE.copy()
+
+    if _looks_non_clinical_transcript(speaker_transcript):
+        logger.warning(
+            "Skipping clinical note extraction because transcript does not contain enough clinical signal"
+        )
         return EMPTY_CLINICAL_NOTE.copy()
 
     # Check Ollama health

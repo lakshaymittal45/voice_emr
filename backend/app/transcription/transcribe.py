@@ -1,12 +1,20 @@
 import os
 import logging
 import soundfile as sf
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
-from typing import List, Dict, Optional, Tuple
-from faster_whisper import WhisperModel
+from typing import Any, List, Dict, Optional, Tuple
 import time
 import librosa
 import numpy as np
+
+try:
+    from faster_whisper import WhisperModel
+    FASTER_WHISPER_AVAILABLE = True
+except ImportError:
+    WhisperModel = Any
+    FASTER_WHISPER_AVAILABLE = False
+    logging.warning("faster-whisper not installed - Whisper backend disabled")
 
 # Audio enhancement libraries
 try:
@@ -16,50 +24,40 @@ except ImportError:
     NOISEREDUCE_AVAILABLE = False
     logging.warning("⚠️ noisereduce not installed - noise reduction disabled")
 
-# ================================================================
-# 🔤 TRANSLATION CONFIGURATION (Google Translate)
-# ================================================================
-# APPROACH: Store BOTH native script + English translation
-# - Native script: For accuracy, legal/audit, LLM processing
-# - English translation: For universal staff readability
-#
-# Why Google Translate > Romanization:
-# ✅ Natural output: "My head hurts" vs "mere sira meM darada"
-# ✅ Universal readability: Anyone with English can understand
-# ✅ Better for medical context: Proper English medical terms
-# ================================================================
-
-ENABLE_TRANSLATION = True  # Use Google Translate for staff-readable version
-STORE_BOTH_VERSIONS = True # Store native + translated (recommended)
-
-# Google Translate support
-try:
-    from googletrans import Translator
-    GOOGLE_TRANSLATOR = Translator()
-    TRANSLATION_AVAILABLE = True
-    logging.info("✅ Google Translate API available (better than romanization)")
-except ImportError:
-    TRANSLATION_AVAILABLE = False
-    GOOGLE_TRANSLATOR = None
-    logging.warning("⚠️  googletrans not installed. Run: pip install googletrans==4.0.0rc1")
-
 # Import medical-grade configuration
 try:
     from app.config import (
+        TRANSCRIPTION_BACKEND,
         TRANSCRIPTION_MODELS,
         TRANSCRIPTION_MODEL_PRIORITY,
         TRANSCRIPTION_DEVICE,
         AUTO_FALLBACK_ON_ERROR,
-        ENABLE_PERFORMANCE_MONITORING
+        ENABLE_PERFORMANCE_MONITORING,
+        OVERLAP_ASSIGNMENT_THRESHOLD,
+        OVERLAP_MIN_DURATION_SEC,
+        PARALLEL_DIARIZATION_TRANSCRIPTION,
     )
     USE_MEDICAL_CONFIG = True
 except ImportError:
     logging.warning("Medical config not found, using legacy configuration")
     USE_MEDICAL_CONFIG = False
+    TRANSCRIPTION_BACKEND = "whisper"
     TRANSCRIPTION_MODEL_PRIORITY = ["small"]
     TRANSCRIPTION_DEVICE = "cpu"
     AUTO_FALLBACK_ON_ERROR = True
     ENABLE_PERFORMANCE_MONITORING = False
+    OVERLAP_ASSIGNMENT_THRESHOLD = 0.45
+    OVERLAP_MIN_DURATION_SEC = 0.30
+    PARALLEL_DIARIZATION_TRANSCRIPTION = False
+
+from app.transcription.offline_indic import (
+    TranscriptSegment,
+    attach_output_variants,
+    get_indic_backend_status,
+    indic_backend_available,
+    selected_indic_language,
+    transcribe_diarization_segments,
+)
 
 # ------------------------------------------------------------------
 # Setup
@@ -93,7 +91,8 @@ ACTIVE_MODEL_NAME = None
 MODEL_LOAD_ERRORS = {}  # Track which models failed
 
 logging.info(
-    f"🏥 Medical-Grade Transcription Enabled | "
+    f"Medical-Grade Transcription Enabled | "
+    f"Backend={TRANSCRIPTION_BACKEND} | "
     f"Priority: {' > '.join(TRANSCRIPTION_MODEL_PRIORITY)}"
 )
 
@@ -197,93 +196,268 @@ def enhance_audio_quality(audio_path: str, output_path: Optional[str] = None) ->
         logging.warning(f"⚠️ Continuing with original audio: {audio_path}")
         return audio_path  # Fallback to original if enhancement fails
 
-# ================================================================
-# �🌐 TRANSLATION HELPER (Native Script → English via Google)
-# ================================================================
-def translate_to_english(text: str, source_language: str = None) -> str:
-    """
-    Translate native script text to English using Google Translate API.
-    
-    This produces much more natural output than romanization:
-    - Input (Hindi):  "मेरे सिर में दर्द है"
-    - Output (English): "My head hurts"
-    
-    Compare to romanization (awkward):
-    - ITRANS: "mere sira meM darda hai" ❌
-    
-    Args:
-        text: Text in native script (Devanagari, Gurmukhi, etc.)
-        source_language: Language code (hi=Hindi, pa=Punjabi, auto-detect if None)
-        
-    Returns:
-        English translation (or original if translation fails/unavailable)
-    """
-    if not TRANSLATION_AVAILABLE or not GOOGLE_TRANSLATOR:
-        return text  # Return as-is if Google Translate not available
-    
-    if not text or not text.strip():
-        return text
-    
-    # 🔍 DEBUG: Log input text details
-    logging.info(f"🔍 DEBUG translate_to_english INPUT: repr={repr(text[:100])}, bytes={text[:50].encode('utf-8', errors='replace')}")
-    
-    # Skip if already in English (detect Latin script predominates)
-    latin_count = sum(1 for char in text if ord(char) < 128)
-    if latin_count / len(text) > 0.7:  # More than 70% Latin chars
-        return text  # Likely already in English
-    
-    # Map Whisper language codes to Google Translate codes
-    lang_map = {
-        'hi': 'hi',  # Hindi
-        'hindi': 'hi',
-        'pa': 'pa',  # Punjabi
-        'punjabi': 'pa',
-        'en': 'en',  # English
-        'english': 'en'
-    }
-    
-    src_lang = lang_map.get(source_language, 'auto')  # Auto-detect if unknown
-    
-    # Try translation with retry logic (googletrans can be flaky)
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            # Add small delay between retries to avoid rate limiting
-            if attempt > 0:
-                time.sleep(0.5 * attempt)
-            
-            # Translate to English
-            result = GOOGLE_TRANSLATOR.translate(text, src=src_lang, dest='en')
-            
-            if result and result.text:
-                translated = result.text.strip()
-                # Log successful translation
-                if translated != text and translated != "":
-                    logging.info(f"✅ Translated [{src_lang}→en]: '{text[:30]}...' → '{translated[:50]}'")
-                    return translated
-                else:
-                    logging.warning(f"⚠️ Translation returned same/empty text (attempt {attempt+1}/{max_retries})")
-                    if attempt < max_retries - 1:
-                        continue  # Retry
-                    return text  #Give up, return original
-            else:
-                logging.warning(f"⚠️ Google Translate returned None (attempt {attempt+1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    continue  # Retry
-                return text
-                
-        except Exception as e:
-            logging.error(
-                f"❌ Translation ERROR (attempt {attempt+1}/{max_retries}): "
-                f"{type(e).__name__}: {str(e)[:100]}"
+def resolve_transcription_backend() -> str:
+    if TRANSCRIPTION_BACKEND == "indicconformer":
+        if not indic_backend_available():
+            raise RuntimeError(
+                "TRANSCRIPTION_BACKEND is set to indicconformer, but the local Indic backend is not installed."
             )
-            if attempt < max_retries - 1:
-                continue  # Retry
-            return text  # Give up after max retries
-    
-    return text  # Fallback
+        return "indicconformer"
 
-def get_whisper_model(preferred_model: Optional[str] = None) -> Tuple[WhisperModel, str]:
+    if TRANSCRIPTION_BACKEND == "whisper":
+        if not FASTER_WHISPER_AVAILABLE:
+            raise RuntimeError(
+                "TRANSCRIPTION_BACKEND is set to whisper, but faster-whisper is not installed."
+            )
+        return "whisper"
+
+    language_hint = selected_indic_language()
+
+    # For mixed-language conversations, prefer the multilingual backend that can
+    # process the whole audio at once and overlap with diarization.
+    if language_hint == "auto" and FASTER_WHISPER_AVAILABLE:
+        return "whisper"
+
+    # If the caller explicitly pins a language, prefer the Indic backend when
+    # it is available because the monolingual models are better tuned for that
+    # language family.
+    if indic_backend_available():
+        return "indicconformer"
+
+    if FASTER_WHISPER_AVAILABLE:
+        return "whisper"
+
+    raise RuntimeError(
+        "No local transcription backend is available. Install AI4Bharat NeMo or faster-whisper."
+    )
+
+
+def _build_transcript_segment(
+    start: float,
+    end: float,
+    text: str,
+    language: Optional[str],
+    raw_words: Optional[List[Any]] = None,
+) -> TranscriptSegment:
+    variants = attach_output_variants(text, language)
+    word_confidences = _build_word_confidences(
+        display_text=(variants["text"] or "").strip(),
+        native_text=variants.get("text_native"),
+        language=variants.get("language"),
+        raw_words=raw_words,
+    )
+    segment = TranscriptSegment(
+        start=float(start),
+        end=float(end),
+        text=(variants["text"] or "").strip(),
+        language=variants.get("language"),
+        text_native=variants.get("text_native"),
+        text_romanized=variants.get("text_romanized"),
+        word_confidences=word_confidences,
+    )
+    return segment
+
+
+def _build_word_confidences(
+    display_text: str,
+    native_text: Optional[str],
+    language: Optional[str],
+    raw_words: Optional[List[Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    if not raw_words:
+        return None
+
+    display_tokens = display_text.split()
+    native_tokens = (native_text or "").split()
+    if not display_tokens:
+        return None
+
+    word_items: List[Dict[str, Any]] = []
+    for index, raw_word in enumerate(raw_words):
+        raw_text = (getattr(raw_word, "word", "") or "").strip()
+        if not raw_text:
+            continue
+
+        variants = attach_output_variants(raw_text, language)
+        token_text = (variants.get("text") or raw_text).strip()
+        probability = getattr(raw_word, "probability", None)
+
+        token_payload: Dict[str, Any] = {
+            "text": token_text,
+            "confidence": round(float(probability), 4) if probability is not None else None,
+        }
+
+        word_start = getattr(raw_word, "start", None)
+        word_end = getattr(raw_word, "end", None)
+        if word_start is not None:
+            token_payload["start"] = round(float(word_start), 2)
+        if word_end is not None:
+            token_payload["end"] = round(float(word_end), 2)
+        if index < len(native_tokens):
+            token_payload["text_native"] = native_tokens[index]
+
+        word_items.append(token_payload)
+
+    if not word_items:
+        return None
+
+    if len(word_items) == len(display_tokens):
+        return word_items
+
+    remapped: List[Dict[str, Any]] = []
+    for index, token in enumerate(display_tokens):
+        source = word_items[min(index, len(word_items) - 1)]
+        remapped.append(
+            {
+                "text": token,
+                "confidence": source.get("confidence"),
+                **({"start": source["start"]} if "start" in source else {}),
+                **({"end": source["end"]} if "end" in source else {}),
+                **({"text_native": source["text_native"]} if source.get("text_native") else {}),
+            }
+        )
+
+    return remapped
+
+
+def _normalize_whisper_segments(raw_segments, language: Optional[str]) -> List[TranscriptSegment]:
+    normalized: List[TranscriptSegment] = []
+    for raw_segment in raw_segments:
+        normalized_segment = _build_transcript_segment(
+            start=getattr(raw_segment, "start", 0.0),
+            end=getattr(raw_segment, "end", 0.0),
+            text=getattr(raw_segment, "text", ""),
+            language=language,
+            raw_words=getattr(raw_segment, "words", None),
+        )
+        if normalized_segment.text:
+            normalized.append(normalized_segment)
+
+    return normalized
+
+
+def _normalize_diarization_segments(
+    audio_path: str,
+    diarization_segments: Optional[List[Dict]],
+) -> List[Dict]:
+    if diarization_segments:
+        return [
+            {
+                "speaker": map_speaker_label(segment.get("speaker")),
+                "start": segment.get("start", 0.0),
+                "end": segment.get("end", 0.0),
+                "overlap": bool(segment.get("overlap", False)),
+                "overlap_speakers": segment.get("overlap_speakers", []),
+            }
+            for segment in diarization_segments
+        ]
+
+    logging.warning("⚠️ Empty diarization segments → fallback to whole audio")
+    return [{
+        "speaker": "Unknown",
+        "start": 0.0,
+        "end": sf.info(audio_path).duration,
+        "overlap": False,
+        "overlap_speakers": [],
+    }]
+
+
+def _align_transcript_to_diarization(
+    diarization_segments: List[Dict],
+    transcript_segments: List[Any],
+) -> List[Dict]:
+    results: List[Dict[str, Any]] = []
+
+    for tseg in transcript_segments:
+        text_value = (getattr(tseg, "text", "") or "").strip()
+        if not text_value:
+            continue
+
+        t_start = float(getattr(tseg, "start", 0.0))
+        t_end = float(getattr(tseg, "end", 0.0))
+        t_duration = max(0.01, t_end - t_start)
+
+        overlap_candidates = []
+        for index, dseg in enumerate(diarization_segments):
+            d_start = float(dseg["start"])
+            d_end = float(dseg["end"])
+            overlap = max(0.0, min(t_end, d_end) - max(t_start, d_start))
+            if overlap > 0:
+                overlap_candidates.append((index, overlap))
+
+        if not overlap_candidates:
+            results.append(
+                {
+                    "speaker": "Unknown",
+                    "start": round(t_start, 2),
+                    "end": round(t_end, 2),
+                    "text": text_value,
+                    "confidence": estimate_confidence(text_value),
+                    **(
+                        {"text_native": getattr(tseg, "text_native").strip()}
+                        if getattr(tseg, "text_native", None)
+                        else {}
+                    ),
+                    **(
+                        {"text_romanized": getattr(tseg, "text_romanized").strip()}
+                        if getattr(tseg, "text_romanized", None)
+                        else {}
+                    ),
+                    **(
+                        {"language": getattr(tseg, "language")}
+                        if getattr(tseg, "language", None)
+                        else {}
+                    ),
+                }
+            )
+            continue
+
+        strongest_overlap = max(overlap for _, overlap in overlap_candidates)
+        strong_targets = [
+            index
+            for index, overlap in overlap_candidates
+            if overlap >= OVERLAP_MIN_DURATION_SEC
+            and (overlap / t_duration) >= OVERLAP_ASSIGNMENT_THRESHOLD
+        ]
+
+        best_index = next(
+            index for index, overlap in overlap_candidates if overlap == strongest_overlap
+        )
+        dseg = diarization_segments[best_index]
+
+        payload = {
+            "speaker": dseg["speaker"],
+            "start": round(t_start, 2),
+            "end": round(t_end, 2),
+            "text": text_value,
+            "confidence": estimate_confidence(text_value),
+        }
+
+        if len(strong_targets) >= 2:
+            overlap_speakers = sorted(
+                {diarization_segments[index]["speaker"] for index in strong_targets}
+            )
+            payload["overlap"] = True
+            payload["overlap_speakers"] = overlap_speakers
+        elif dseg.get("overlap"):
+            payload["overlap"] = True
+            if dseg.get("overlap_speakers"):
+                payload["overlap_speakers"] = dseg["overlap_speakers"]
+
+        if getattr(tseg, "text_native", None):
+            payload["text_native"] = tseg.text_native.strip()
+        if getattr(tseg, "text_romanized", None):
+            payload["text_romanized"] = tseg.text_romanized.strip()
+        if getattr(tseg, "language", None):
+            payload["language"] = tseg.language
+        if getattr(tseg, "word_confidences", None):
+            payload["word_confidences"] = tseg.word_confidences
+
+        results.append(payload)
+
+    return results
+
+def get_whisper_model(preferred_model: Optional[str] = None) -> Tuple['WhisperModel', 'str']:
     """
     🏥 ENHANCED: Lazy-load Whisper model with automatic fallback.
     
@@ -299,6 +473,9 @@ def get_whisper_model(preferred_model: Optional[str] = None) -> Tuple[WhisperMod
         RuntimeError if all models fail to load
     """
     global WHISPER_MODELS, ACTIVE_MODEL_NAME, MODEL_LOAD_ERRORS
+
+    if not FASTER_WHISPER_AVAILABLE:
+        raise RuntimeError("faster-whisper is not installed")
     
     # Determine model priority
     if preferred_model and preferred_model in TRANSCRIPTION_MODEL_PRIORITY:
@@ -605,7 +782,7 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
             # hallucination_silence_threshold=0.5,  # COMMENTED OUT - too aggressive
 
             condition_on_previous_text=False,  # Prevents looping on prev output
-            word_timestamps=False,
+            word_timestamps=True,
 
             # 🌐 Better language detection for multilingual audio
             language_detection_segments=4,  # Use 4 segments instead of 1
@@ -685,39 +862,18 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
         #   c) Emit the same char/symbol pattern endlessly
         if result:
             result = _filter_hallucinated_segments(result, model_name)
-        
-        # 🌐 GOOGLE TRANSLATE: Convert native scripts to English for staff readability
-        # Stores natural English: "My head hurts" instead of awkward romanization
-        # LLM can still read native script, but staff get readable English
-        if ENABLE_TRANSLATION and TRANSLATION_AVAILABLE and info.language in ['hi', 'pa', 'hindi', 'punjabi']:
-            logging.info(f"🌐 Translating {info.language} → English using Google Translate...")
-            translated_count = 0
-            
-            for segment in result:
-                original_text = segment.text
-                english_text = translate_to_english(original_text, info.language)
-                
-                if english_text != original_text:
-                    # Store both versions in segment (can be saved separately in DB)
-                    if STORE_BOTH_VERSIONS:
-                        segment.text_native = original_text  # "मेरे सिर में दर्द है"
-                        segment.text = english_text          # "My head hurts"
-                    else:
-                        segment.text = english_text  # Replace with English only
-                    
-                    translated_count += 1
-            
-            if translated_count > 0:
+
+        normalized_result = _normalize_whisper_segments(result, info.language)
+        if normalized_result:
+            romanized_count = sum(1 for segment in normalized_result if segment.text_native)
+            if romanized_count:
                 logging.info(
-                    f"✅ Translated {translated_count}/{len(result)} segments | "
-                    f"{info.language} → English (natural output)"
+                    "Offline Romanization applied to %s/%s Whisper segments (language=%s)",
+                    romanized_count,
+                    len(normalized_result),
+                    info.language,
                 )
-        elif info.language in ['hi', 'pa', 'hindi', 'punjabi']:
-            logging.info(
-                f"ℹ️  Preserving native script for {info.language} | "
-                f"Install googletrans for English translations"
-            )
-        
+
         # Cleanup enhanced audio file
         if enhanced_audio_path != audio_path and os.path.exists(enhanced_audio_path):
             try:
@@ -726,7 +882,7 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
             except Exception as e:
                 logging.warning(f"⚠️ Failed to cleanup enhanced audio: {e}")
         
-        return result
+        return normalized_result
         
     except Exception as e:
         # Cleanup enhanced audio on error
@@ -755,16 +911,17 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
 def speaker_wise_transcription(
     audio_path: str,
     diarization_segments: List[Dict],
-    preferred_model: Optional[str] = None
+    preferred_model: Optional[str] = None,
+    precomputed_transcript_segments: Optional[List[Any]] = None,
 ) -> List[Dict]:
     """
     🏥 ENHANCED: Medical-grade speaker-wise transcription.
     
     Features:
-    - Uses best available Whisper model
-    - Robust alignment with diarization
-    - Fallback for empty diarization
-    - Performance monitoring
+    - Uses the active local backend (IndicConformer or Whisper)
+    - Falls back safely when diarization is empty
+    - Keeps transcript output offline-friendly via Romanization
+    - Preserves native text for downstream LLM extraction
     
     Args:
         audio_path: Path to audio file
@@ -778,55 +935,60 @@ def speaker_wise_transcription(
     if not os.path.exists(audio_path):
         raise FileNotFoundError(audio_path)
 
-    # 🔥 SAFETY NET: empty diarization
-    if not diarization_segments:
-        logging.warning("⚠️ Empty diarization segments → fallback to whole audio")
-        diarization_segments = [{
-            "speaker": "Unknown",
-            "start": 0.0,
-            "end": sf.info(audio_path).duration
-        }]
+    global ACTIVE_MODEL_NAME
 
-    logging.info(f"🎤 Starting full-audio Whisper transcription with {len(diarization_segments)} speaker segments")
-    whisper_segments = transcribe_full_audio(audio_path, preferred_model)
+    backend = resolve_transcription_backend()
+    normalized_diarization_segments = _normalize_diarization_segments(
+        audio_path=audio_path,
+        diarization_segments=diarization_segments,
+    )
+
+    if backend == "indicconformer":
+        language_hint = selected_indic_language()
+        ACTIVE_MODEL_NAME = (
+            f"indicconformer:{language_hint}"
+            if language_hint != "auto"
+            else "indicconformer:multilingual"
+        )
+
+        logging.info(
+            "Starting segment-wise IndicConformer transcription with %s speaker segments",
+            len(normalized_diarization_segments),
+        )
+
+        enhanced_audio_path = enhance_audio_quality(audio_path)
+        try:
+            results = transcribe_diarization_segments(
+                audio_path=enhanced_audio_path,
+                diarization_segments=normalized_diarization_segments,
+                confidence_fn=estimate_confidence,
+            )
+        finally:
+            if enhanced_audio_path != audio_path and os.path.exists(enhanced_audio_path):
+                try:
+                    os.remove(enhanced_audio_path)
+                except OSError:
+                    pass
+
+        logging.info(
+            "IndicConformer transcription completed | model=%s | segments=%s",
+            ACTIVE_MODEL_NAME,
+            len(results),
+        )
+        return results
+
+    if precomputed_transcript_segments is None:
+        logging.info(
+            f"🎤 Starting full-audio Whisper transcription with {len(normalized_diarization_segments)} speaker segments"
+        )
+        whisper_segments = transcribe_full_audio(audio_path, preferred_model)
+    else:
+        whisper_segments = precomputed_transcript_segments
     logging.info(f"✅ Whisper transcription finished | Active model: {ACTIVE_MODEL_NAME}")
-
-    results = []
-    used_whisper_segments = set()  # Track which Whisper segments have been assigned
-
-    for dseg in diarization_segments:
-        d_start = dseg["start"]
-        d_end = dseg["end"]
-        speaker = map_speaker_label(dseg["speaker"])
-
-        texts = []
-
-        for idx, wseg in enumerate(whisper_segments):
-            # Skip if already assigned to another speaker
-            if idx in used_whisper_segments:
-                continue
-                
-            # 🔥 IMPROVED: Use center-based alignment to prevent duplicates
-            # Assign segment to speaker only if its center falls within speaker's time range
-            segment_center = (wseg.start + wseg.end) / 2
-            
-            # Check if segment center is within this speaker's time
-            if d_start <= segment_center <= d_end:
-                text_from_whisper = wseg.text.strip()
-                texts.append(text_from_whisper)
-                used_whisper_segments.add(idx)  # Mark as used
-
-        final_text = " ".join(texts).strip()
-        if not final_text:
-            continue
-
-        results.append({
-            "speaker": speaker,
-            "start": round(d_start, 2),
-            "end": round(d_end, 2),
-            "text": final_text,
-            "confidence": estimate_confidence(final_text)
-        })
+    results = _align_transcript_to_diarization(
+        diarization_segments=normalized_diarization_segments,
+        transcript_segments=whisper_segments,
+    )
 
     logging.info(
         f"📝 Speaker-wise transcription completed | "
@@ -835,6 +997,57 @@ def speaker_wise_transcription(
     )
 
     return results
+
+
+def diarize_and_transcribe_audio(
+    audio_path: str,
+    preferred_model: Optional[str] = None,
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Run diarization and transcription with overlap when the backend supports it.
+
+    Whisper can transcribe the full audio without waiting for diarization, so
+    both jobs run in parallel and the final speaker alignment happens after.
+    IndicConformer still needs diarization-first segmentation, so it stays
+    sequential.
+    """
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(audio_path)
+
+    from app.diarization.diarize import run_diarization
+
+    backend = resolve_transcription_backend()
+    can_parallelize = backend == "whisper" and PARALLEL_DIARIZATION_TRANSCRIPTION
+
+    if not can_parallelize:
+        diarization_segments = run_diarization(audio_path)
+        speaker_transcript = speaker_wise_transcription(
+            audio_path=audio_path,
+            diarization_segments=diarization_segments,
+            preferred_model=preferred_model,
+        )
+        return diarization_segments, speaker_transcript
+
+    logging.info("Starting parallel diarization + Whisper transcription")
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="voice_emr_ml") as executor:
+        diarization_future = executor.submit(run_diarization, audio_path)
+        transcription_future = executor.submit(transcribe_full_audio, audio_path, preferred_model)
+
+        diarization_segments = diarization_future.result()
+        whisper_segments = transcription_future.result()
+
+    speaker_transcript = speaker_wise_transcription(
+        audio_path=audio_path,
+        diarization_segments=diarization_segments,
+        preferred_model=preferred_model,
+        precomputed_transcript_segments=whisper_segments,
+    )
+    logging.info(
+        "Parallel diarization + transcription completed | diarization_segments=%s | transcript_segments=%s",
+        len(diarization_segments),
+        len(speaker_transcript),
+    )
+    return diarization_segments, speaker_transcript
 
 # ------------------------------------------------------------------
 # Model Health Check and Status
@@ -845,12 +1058,22 @@ def get_transcription_status() -> Dict:
     Returns current transcription model status and capabilities.
     Useful for health checks and monitoring.
     """
+    resolved_backend = None
+    try:
+        resolved_backend = resolve_transcription_backend()
+    except Exception as exc:
+        resolved_backend = f"unavailable: {exc}"
+
     return {
+        "configured_backend": TRANSCRIPTION_BACKEND,
+        "resolved_backend": resolved_backend,
+        "parallel_diarization_transcription": PARALLEL_DIARIZATION_TRANSCRIPTION,
         "active_model": ACTIVE_MODEL_NAME,
         "available_models": list(WHISPER_MODELS.keys()),
         "failed_models": MODEL_LOAD_ERRORS,
         "device": TRANSCRIPTION_DEVICE,
         "medical_config_enabled": USE_MEDICAL_CONFIG,
         "auto_fallback_enabled": AUTO_FALLBACK_ON_ERROR,
-        "performance_monitoring": ENABLE_PERFORMANCE_MONITORING
+        "performance_monitoring": ENABLE_PERFORMANCE_MONITORING,
+        "indic_backend": get_indic_backend_status(),
     }

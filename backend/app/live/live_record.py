@@ -19,9 +19,8 @@ from typing import List, Dict, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
-from app.diarization.diarize import run_diarization
 from app.transcription.transcribe import (
-    speaker_wise_transcription,
+    diarize_and_transcribe_audio,
     enhance_audio_quality,
 )
 from app.llm.extract_notes import extract_clinical_notes
@@ -31,6 +30,11 @@ from app.encryption.aes_encrypt import encrypt_text
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+try:
+    from app.config import LIVE_TRANSCRIPT_HOLDBACK_SEC
+except ImportError:
+    LIVE_TRANSCRIPT_HOLDBACK_SEC = 1.2
 
 # ----------------------------------------------------------------
 # 📁 Central recordings folder (shared with upload endpoint)
@@ -181,6 +185,50 @@ def _enhance_wav(wav_path: str) -> str:
         return wav_path
 
 
+def _segment_identity(seg: Dict) -> tuple:
+    return (
+        seg.get("speaker"),
+        round(float(seg.get("start", 0.0)), 2),
+        round(float(seg.get("end", 0.0)), 2),
+        seg.get("text", ""),
+    )
+
+
+def _stable_transcript_prefix(transcript: List[Dict], audio_duration: float) -> List[Dict]:
+    stable_cutoff = max(0.0, audio_duration - LIVE_TRANSCRIPT_HOLDBACK_SEC)
+    return [
+        seg for seg in transcript
+        if float(seg.get("end", 0.0)) <= stable_cutoff
+    ]
+
+
+def _merge_incremental_transcript(existing: List[Dict], latest_stable: List[Dict]) -> List[Dict]:
+    merged = [seg.copy() for seg in existing]
+
+    for seg in latest_stable:
+        replaced = False
+        for index, previous in enumerate(merged):
+            if (
+                previous.get("speaker") == seg.get("speaker")
+                and abs(float(previous.get("start", 0.0)) - float(seg.get("start", 0.0))) <= 0.6
+                and abs(float(previous.get("end", 0.0)) - float(seg.get("end", 0.0))) <= 1.2
+            ):
+                merged[index] = seg
+                replaced = True
+                break
+
+        if not replaced:
+            merged.append(seg)
+
+    deduped = {}
+    for seg in merged:
+        deduped[_segment_identity(seg)] = seg
+
+    merged = list(deduped.values())
+    merged.sort(key=lambda seg: (float(seg.get("start", 0.0)), float(seg.get("end", 0.0))))
+    return merged
+
+
 async def _send_json(ws: WebSocket, data: dict):
     """Send JSON only if the socket is still open."""
     if ws.client_state == WebSocketState.CONNECTED:
@@ -194,9 +242,8 @@ async def _send_json(ws: WebSocket, data: dict):
 def _run_incremental_pipeline(wav_path: str) -> List[Dict]:
     """Diarize + transcribe a partial WAV file.
 
-    Audio enhancement is applied automatically since
-    ``speaker_wise_transcription`` → ``transcribe_full_audio`` calls
-    ``enhance_audio_quality`` internally.
+    Audio enhancement is applied automatically since the transcription
+    pipeline still routes through ``transcribe_full_audio`` for Whisper.
 
     Returns speaker transcript list.
     """
@@ -208,8 +255,8 @@ def _run_incremental_pipeline(wav_path: str) -> List[Dict]:
             f"Sample rate: {info.samplerate}Hz | Channels: {info.channels}"
         )
 
-        # 1. Run diarization
-        segments = run_diarization(wav_path)
+        # 1. Run diarization + transcription, overlapping where possible
+        segments, transcript = diarize_and_transcribe_audio(wav_path)
         if not segments:
             logger.warning(
                 "[Incremental] No diarization segments returned | "
@@ -217,14 +264,8 @@ def _run_incremental_pipeline(wav_path: str) -> List[Dict]:
                 "This may indicate very quiet audio or silence"
             )
             return []
-        
-        logger.info(f"[Incremental] Diarization found {len(segments)} speaker segments")
 
-        # 2. Run transcription
-        transcript = speaker_wise_transcription(
-            audio_path=wav_path,
-            diarization_segments=segments,
-        )
+        logger.info(f"[Incremental] Diarization found {len(segments)} speaker segments")
         
         if not transcript:
             logger.warning(
@@ -260,7 +301,7 @@ def _run_full_pipeline(
     clinician: str,
 ) -> int:
     """
-    Full pipeline: enhance → diarize → transcribe → LLM → encrypt → DB.
+    Full pipeline: enhance → diarize/transcribe → LLM → encrypt → DB.
     Returns the audio_id written to MySQL.
     """
     key = _init_aes_key()
@@ -280,40 +321,33 @@ def _run_full_pipeline(
     logger.info("🎙️ [Live] Step 0/5: Audio enhancement…")
     _enhance_wav(wav_path)
 
-    # 1. Diarization
-    logger.info("🎙️ [Live] Step 1/5: Diarization…")
-    segments = run_diarization(wav_path)
+    # 1. Diarization + transcription
+    logger.info("🎙️ [Live] Step 1/5: Diarization + Transcription…")
+    segments, speaker_transcript = diarize_and_transcribe_audio(wav_path)
     if not segments:
         raise RuntimeError("Diarization returned no segments")
     logger.info(f"   → {len(segments)} speaker segments found")
-
-    # 2. Transcription (also runs its own internal enhancement – harmless double pass)
-    logger.info("🎙️ [Live] Step 2/5: Transcription…")
-    speaker_transcript = speaker_wise_transcription(
-        audio_path=wav_path,
-        diarization_segments=segments,
-    )
     if not speaker_transcript:
         raise RuntimeError("Empty speaker-wise transcript")
     logger.info(f"   → {len(speaker_transcript)} transcript segments")
 
-    # 3. LLM clinical notes
-    logger.info("🎙️ [Live] Step 3/5: LLM extraction…")
+    # 2. LLM clinical notes
+    logger.info("🎙️ [Live] Step 2/5: LLM extraction…")
     clinical_notes = extract_clinical_notes(speaker_transcript)
     logger.info(
         f"   → chief_complaint present: "
         f"{bool(clinical_notes.get('chief_complaint'))}"
     )
 
-    # 4. Encrypt transcript
-    logger.info("🎙️ [Live] Step 4/5: Encrypting transcript…")
+    # 3. Encrypt transcript
+    logger.info("🎙️ [Live] Step 3/5: Encrypting transcript…")
     encrypted_transcript = encrypt_text(
         json.dumps(speaker_transcript, ensure_ascii=False),
         key,
     )
 
-    # 5. DB insert (single transaction)
-    logger.info("🎙️ [Live] Step 5/5: Saving to database…")
+    # 4. DB insert (single transaction)
+    logger.info("🎙️ [Live] Step 4/5: Saving to database…")
     conn = get_mysql_connection()
     cursor = conn.cursor()
     conn.start_transaction()
@@ -417,13 +451,14 @@ async def live_record_ws(ws: WebSocket):
     recording = False
     wav_path: Optional[str] = None
     incremental_task: Optional[asyncio.Task] = None
+    committed_transcript: List[Dict] = []
 
     # ----------------------------------------------------------
     # Background coroutine: periodic incremental transcription
     # ----------------------------------------------------------
     async def _incremental_loop():
         """Periodically flush accumulated audio to disk & transcribe."""
-        nonlocal audio_chunks, wav_path
+        nonlocal audio_chunks, wav_path, committed_transcript
         loop = asyncio.get_event_loop()
         cycle = 0
 
@@ -492,13 +527,18 @@ async def live_record_ws(ws: WebSocket):
                 logger.info(f"[Incremental #{cycle}] Pipeline completed, got {len(transcript) if transcript else 0} segments")
                 
                 if transcript and len(transcript) > 0:
+                    stable_transcript = _stable_transcript_prefix(transcript, info.duration)
+                    committed_transcript = _merge_incremental_transcript(
+                        committed_transcript,
+                        stable_transcript,
+                    )
                     logger.info(
-                        f"✅ [Incremental #{cycle}] SUCCESS! Sending {len(transcript)} segments to client | "
-                        f"Total chars: {sum(len(seg.get('text', '')) for seg in transcript)}"
+                        f"✅ [Incremental #{cycle}] SUCCESS! Stable segments this pass: {len(stable_transcript)} | "
+                        f"Committed segments: {len(committed_transcript)}"
                     )
                     await _send_json(ws, {
                         "type": "transcript",
-                        "data": transcript,
+                        "data": committed_transcript,
                     })
                     await _send_json(ws, {
                         "type": "status",
@@ -573,6 +613,7 @@ async def live_record_ws(ws: WebSocket):
                     clinician = raw_clin.strip()
                     wav_path = _build_wav_path(patient_id)
                     audio_chunks = bytearray()
+                    committed_transcript = []
                     recording = True
 
                     logger.info(

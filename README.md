@@ -182,6 +182,14 @@ All backend settings live in `backend/.env`
 | `CORS_ORIGINS` | ✅ | `http://localhost:3000` | Comma-separated allowed frontend origins |
 | `PATIENT_CONVO_DIR` | ⬜ | `D:\Patient Convo` | Folder where all audio files are stored |
 | `WHISPER_DEVICE` | ⬜ | auto | Force `cpu` or `cuda` |
+| `TRANSCRIPTION_BACKEND` | ⬜ | `auto` | `auto`, `indicconformer`, or `whisper` |
+| `TRANSCRIPT_OUTPUT_MODE` | ⬜ | `romanized` | `native`, `romanized`, or `both` |
+| `INDIC_TRANSCRIPTION_LANGUAGE` | ⬜ | `auto` | Use `hi`, `pa`, etc. to force a monolingual Indic model |
+| `PARALLEL_DIARIZATION_TRANSCRIPTION` | ⬜ | `true` | Overlap diarization and ASR when the resolved backend is Whisper |
+| `LIVE_TRANSCRIPT_HOLDBACK_SEC` | ⬜ | `1.2` | Keep the last active-speech tail out of live transcript updates so utterances are not cut mid-sentence |
+
+For fully local Hindi/Punjabi and other Indic ASR, set `TRANSCRIPTION_BACKEND=indicconformer` after installing the AI4Bharat NeMo fork and downloading the selected model locally.
+If your consultations regularly mix Hindi, Punjabi, and English in the same recording, keep `TRANSCRIPTION_BACKEND=auto` and `INDIC_TRANSCRIPTION_LANGUAGE=auto` so the system prefers the multilingual Whisper path.
 
 **Frontend** (`frontend/.env.local`):
 
