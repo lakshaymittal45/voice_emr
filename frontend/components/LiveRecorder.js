@@ -27,6 +27,23 @@ export default function LiveRecorder({
   const timerRef = useRef(null);
   const analyserRef = useRef(null);
   const animFrameRef = useRef(null);
+  const isRecordingRef = useRef(false);  // ref to avoid stale closure in ws.onclose
+
+  // Map speaker IDs from backend (SPEAKER_00, SPEAKER_01) to human-readable labels
+  function getSpeakerDisplay(speakerId) {
+    if (!speakerId) return { label: "Speaker", icon: "👤", cssClass: "speaker-other" };
+    // Already human-readable
+    if (speakerId === "Doctor") return { label: "Doctor", icon: "🩺", cssClass: "speaker-doctor" };
+    if (speakerId === "Patient") return { label: "Patient", icon: "🧑", cssClass: "speaker-patient" };
+    // SPEAKER_XX format from backend
+    if (speakerId.startsWith("SPEAKER_")) {
+      const num = parseInt(speakerId.replace("SPEAKER_", ""), 10);
+      if (num === 0) return { label: "Speaker 1", icon: "🩺", cssClass: "speaker-doctor" };
+      if (num === 1) return { label: "Speaker 2", icon: "🧑", cssClass: "speaker-patient" };
+      return { label: `Speaker ${num + 1}`, icon: "👤", cssClass: "speaker-other" };
+    }
+    return { label: speakerId, icon: "👤", cssClass: "speaker-other" };
+  }
 
   // ----------------------------------------------------------
   // Helpers
@@ -143,6 +160,7 @@ export default function LiveRecorder({
 
         recorder.start(1000); // timeslice = 1s
         setIsRecording(true);
+        isRecordingRef.current = true;
         setStatusMsg("🔴 Recording…");
 
         // Start elapsed timer
@@ -178,6 +196,11 @@ export default function LiveRecorder({
           setError(msg.message);
           setFinishing(false);
           console.error("❌ Error:", msg.message);
+        } else if (msg.type === "ping") {
+          // Respond to server ping to keep connection alive
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "pong" }));
+          }
         }
       } catch (err) {
         console.error("Failed to parse WebSocket message:", err);
@@ -191,8 +214,9 @@ export default function LiveRecorder({
 
     ws.onclose = (event) => {
       console.log("🔌 WebSocket closed:", event.code, event.reason);
-      if (isRecording) {
+      if (isRecordingRef.current) {
         setIsRecording(false);
+        isRecordingRef.current = false;
         setStatusMsg("Connection closed");
       }
     };
@@ -226,6 +250,7 @@ export default function LiveRecorder({
     setIsRecording(false);
     setIsPaused(false);
     setFinishing(true);
+    isRecordingRef.current = false;
     setStatusMsg("Stopping recording & processing…");
 
     if (timerRef.current) clearInterval(timerRef.current);
@@ -374,32 +399,31 @@ export default function LiveRecorder({
           </div>
         ) : (
           <div className="live-transcript-list">
-            {transcript.map((seg, idx) => (
-              <div
-                key={idx}
-                className={`transcript-line-enhanced ${
-                  seg.speaker === "Doctor"
-                    ? "speaker-doctor"
-                    : "speaker-patient"
-                }`}
-              >
-                <div className="transcript-header-enhanced">
-                  <div className="speaker-info">
-                    <span className="speaker-badge">
-                      {seg.speaker === "Doctor" ? "🩺" : "🧑"}
-                    </span>
-                    <span className="speaker-name">{seg.speaker}</span>
+            {transcript.map((seg, idx) => {
+              const speaker = getSpeakerDisplay(seg.speaker);
+              return (
+                <div
+                  key={idx}
+                  className={`transcript-line-enhanced ${speaker.cssClass}`}
+                >
+                  <div className="transcript-header-enhanced">
+                    <div className="speaker-info">
+                      <span className="speaker-badge">
+                        {speaker.icon}
+                      </span>
+                      <span className="speaker-name">{speaker.label}</span>
+                    </div>
+                    {seg.start !== undefined && (
+                      <span className="timestamp-badge">
+                        {fmtTime(Math.round(seg.start))} –{" "}
+                        {fmtTime(Math.round(seg.end))}
+                      </span>
+                    )}
                   </div>
-                  {seg.start !== undefined && (
-                    <span className="timestamp-badge">
-                      {fmtTime(Math.round(seg.start))} –{" "}
-                      {fmtTime(Math.round(seg.end))}
-                    </span>
-                  )}
+                  <p className="transcript-text-enhanced">{seg.text}</p>
                 </div>
-                <p className="transcript-text-enhanced">{seg.text}</p>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

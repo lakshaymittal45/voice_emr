@@ -1,12 +1,14 @@
 import os
-import re
 import json
 import logging
+import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Query, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 import soundfile as sf
@@ -40,6 +42,10 @@ def _to_utc_iso(dt_value):
     else:
         dt_value = dt_value.astimezone(timezone.utc)
     return dt_value.isoformat()
+
+
+def _has_meaningful_clinical_notes(clinical_notes):
+    return any(value is not None and str(value).strip() for value in clinical_notes.values())
 
 # Custom filter to suppress repetitive status checks from logs
 class StatusCheckFilter(logging.Filter):
@@ -136,8 +142,10 @@ ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".webm"}
 
 # Bulk upload limits
 MAX_BULK_FILES = 20  # Maximum files in one bulk upload
-MAX_BULK_TOTAL_SIZE_MB = 6000  # Maximum total size for bulk upload (2GB)
+MAX_BULK_TOTAL_SIZE_MB = 6000  # Maximum total size for bulk upload (6GB)
 MAX_BULK_TOTAL_SIZE_BYTES = MAX_BULK_TOTAL_SIZE_MB * 1024 * 1024
+QUEUED_MARKER = "QUEUED"
+FAILED_MARKER = "FAILED"
 
 # ------------------------------------------------------------------
 # Validation helpers
@@ -219,28 +227,37 @@ def process_audio_pipeline(audio_id: int, audio_path: str):
         if not is_valid:
             raise RuntimeError(f"Audio validation failed: {error_msg}")
 
-        # 1️⃣ + 2️⃣ Diarization and transcription
-        logger.info(f"[{audio_id}] Step 1/4: Diarization + Transcription...")
+        # 1️⃣ + 2️⃣ Diarization and transcription (already parallelised internally)
+        logger.info(f"[{audio_id}] Step 1/3: Diarization + Transcription...")
+        t0 = time.perf_counter()
         segments, speaker_transcript = diarize_and_transcribe_audio(audio_path)
 
         if not segments:
             raise RuntimeError("Diarization returned no segments")
-
         if not speaker_transcript:
             raise RuntimeError("Empty speaker-wise transcript")
 
-        # 3️⃣ Clinical note extraction
-        logger.info(f"[{audio_id}] Step 3/4: LLM extraction...")
-        clinical_notes = extract_clinical_notes(speaker_transcript)
+        t_transcribe = time.perf_counter() - t0
+        logger.info(f"[{audio_id}]   → Diarize+Transcribe done in {t_transcribe:.1f}s")
 
-        # 4️⃣ Encrypt transcript
-        logger.info(f"[{audio_id}] Step 4/4: Encryption & DB storage...")
-        encrypted_transcript = encrypt_text(
-            json.dumps(speaker_transcript, ensure_ascii=False),
-            AES_KEY
-        )
+        # 3️⃣ LLM extraction ∥ Encryption  (independent → run concurrently)
+        logger.info(f"[{audio_id}] Step 2/3: LLM extraction ∥ Encryption (parallel)...")
+        t1 = time.perf_counter()
 
-        # 5️⃣ Update DB with atomic transaction
+        transcript_json = json.dumps(speaker_transcript, ensure_ascii=False)
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipeline") as pool:
+            llm_future = pool.submit(extract_clinical_notes, speaker_transcript)
+            encrypt_future = pool.submit(encrypt_text, transcript_json, AES_KEY)
+
+            clinical_notes = llm_future.result()
+            encrypted_transcript = encrypt_future.result()
+
+        t_parallel = time.perf_counter() - t1
+        logger.info(f"[{audio_id}]   → LLM+Encrypt done in {t_parallel:.1f}s")
+
+        # 3️⃣ Update DB with atomic transaction
+        logger.info(f"[{audio_id}] Step 3/3: DB storage...")
         conn = get_mysql_connection()
         cursor = conn.cursor()
 
@@ -309,7 +326,7 @@ def process_audio_pipeline(audio_id: int, audio_path: str):
                 SET transcript_encrypted=%s
                 WHERE audio_id=%s
                 """,
-                ("FAILED", audio_id)
+                (FAILED_MARKER, audio_id)
             )
             fail_conn.commit()
         except Exception as fail_error:
@@ -458,20 +475,17 @@ async def upload_consultation_audio(
 
 @app.post("/upload-consultation-audio-bulk")
 async def upload_consultation_audio_bulk(
-    patient_id: str,
-    clinician: str,
+    patient_id: str | None = None,
+    clinician: str | None = None,
+    metadata_json: str | None = Form(None),
     audio_files: list[UploadFile] = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    # 🔒 Validation 0: Sanitize identifiers
-    patient_id = _validate_identifier(patient_id, "patient_id")
-    clinician = _validate_identifier(clinician, "clinician")
     """
     Bulk upload multiple consultation audio files.
     All files will be validated and queued for processing.
     Returns list of audio_ids and any per-file errors.
     """
-    
     # 🔒 Validation 1: Check number of files
     if not audio_files or len(audio_files) == 0:
         raise HTTPException(status_code=400, detail="No audio files provided")
@@ -482,7 +496,56 @@ async def upload_consultation_audio_bulk(
             detail=f"Too many files. Maximum {MAX_BULK_FILES} files per bulk upload"
         )
     
-    logger.info(f"Bulk upload started: {len(audio_files)} files for patient {patient_id}")
+    file_mappings = []
+    if metadata_json:
+        try:
+            parsed_metadata = json.loads(metadata_json)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid metadata_json: {exc.msg}")
+
+        if not isinstance(parsed_metadata, list):
+            raise HTTPException(status_code=400, detail="metadata_json must be a JSON array")
+
+        if len(parsed_metadata) != len(audio_files):
+            raise HTTPException(
+                status_code=400,
+                detail="metadata_json must contain one entry per uploaded audio file"
+            )
+
+        for idx, item in enumerate(parsed_metadata):
+            if not isinstance(item, dict):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"metadata_json entry {idx + 1} must be an object"
+                )
+            try:
+                mapped_patient_id = _validate_identifier(item.get("patient_id", ""), f"patient_id for file {idx + 1}")
+                mapped_clinician = _validate_identifier(item.get("clinician", ""), f"clinician for file {idx + 1}")
+            except HTTPException:
+                raise
+
+            file_mappings.append({
+                "patient_id": mapped_patient_id,
+                "clinician": mapped_clinician,
+            })
+    else:
+        if patient_id is None or clinician is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide per-file metadata_json or shared patient_id and clinician"
+            )
+
+        shared_patient_id = _validate_identifier(patient_id, "patient_id")
+        shared_clinician = _validate_identifier(clinician, "clinician")
+        file_mappings = [
+            {
+                "patient_id": shared_patient_id,
+                "clinician": shared_clinician,
+            }
+            for _ in audio_files
+        ]
+    
+    logger.info(f"Bulk upload started: {len(audio_files)} files")
     
     results = []
     successful_uploads = []
@@ -492,6 +555,7 @@ async def upload_consultation_audio_bulk(
     # First pass: Validate all files and check total size
     for idx, audio in enumerate(audio_files):
         file_num = idx + 1
+        file_mapping = file_mappings[idx]
         
         try:
             # Check filename
@@ -543,7 +607,9 @@ async def upload_consultation_audio_bulk(
                 "file_number": file_num,
                 "filename": audio.filename,
                 "suffix": suffix,
-                "content": audio_content
+                "content": audio_content,
+                "patient_id": file_mapping["patient_id"],
+                "clinician": file_mapping["clinician"],
             })
             
         except Exception as e:
@@ -569,7 +635,7 @@ async def upload_consultation_audio_bulk(
         
         try:
             # Save file with PatientID_datetime naming (overwrites if same second)
-            audio_path = _build_upload_path(patient_id, file_info["suffix"])
+            audio_path = _build_upload_path(file_info["patient_id"], file_info["suffix"])
             already_existed = os.path.exists(audio_path)
             _save_upload(audio_path, file_info["content"])
             logger.info(
@@ -610,11 +676,11 @@ async def upload_consultation_audio_bulk(
                     VALUES (%s,%s,%s,%s,%s)
                     """,
                     (
-                        patient_id,
-                        clinician,
+                        file_info["patient_id"],
+                        file_info["clinician"],
                         datetime.now(timezone.utc),
                         audio_path,
-                        ""
+                        QUEUED_MARKER
                     )
                 )
                 
@@ -623,17 +689,12 @@ async def upload_consultation_audio_bulk(
                 
                 logger.info(f"[Bulk {file_info['file_number']}/{len(audio_files)}] Created record {audio_id}")
                 
-                # Queue background processing
-                background_tasks.add_task(
-                    process_audio_pipeline,
-                    audio_id,
-                    audio_path
-                )
-                
                 results.append({
                     "file_number": file_info["file_number"],
                     "filename": file_info["filename"],
-                    "status": "accepted",
+                    "patient_id": file_info["patient_id"],
+                    "clinician": file_info["clinician"],
+                    "status": "queued",
                     "audio_id": audio_id
                 })
                 
@@ -643,6 +704,8 @@ async def upload_consultation_audio_bulk(
                 failed_uploads.append({
                     "file_number": file_info["file_number"],
                     "filename": file_info["filename"],
+                    "patient_id": file_info["patient_id"],
+                    "clinician": file_info["clinician"],
                     "status": "rejected",
                     "error": "Database error"
                 })
@@ -659,6 +722,8 @@ async def upload_consultation_audio_bulk(
             failed_uploads.append({
                 "file_number": file_info["file_number"],
                 "filename": file_info["filename"],
+                "patient_id": file_info["patient_id"],
+                "clinician": file_info["clinician"],
                 "status": "rejected",
                 "error": "Processing error"
             })
@@ -671,14 +736,14 @@ async def upload_consultation_audio_bulk(
     failed_count = len(failed_uploads)
     
     logger.info(
-        f"Bulk upload completed: {success_count} successful, "
+        f"Bulk upload completed: {success_count} queued, "
         f"{failed_count} failed out of {len(audio_files)} files"
     )
     
     return {
-        "status": "completed",
+        "status": "queued",
         "total_files": len(audio_files),
-        "successful": success_count,
+        "queued": success_count,
         "failed": failed_count,
         "results": all_results
     }
@@ -712,8 +777,11 @@ def consultation_status(audio_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Audio not found")
 
-    if row["transcript_encrypted"] == "FAILED":
+    if row["transcript_encrypted"] == FAILED_MARKER:
         return {"audio_id": audio_id, "status": "failed"}
+
+    if row["transcript_encrypted"] == QUEUED_MARKER:
+        return {"audio_id": audio_id, "status": "queued"}
 
     if not row["transcript_encrypted"]:
         return {"audio_id": audio_id, "status": "processing"}
@@ -764,8 +832,10 @@ def consultation_status_batch(audio_ids: list[int]):
         aid = row["audio_id"]
         encrypted = row["transcript_encrypted"]
         
-        if encrypted == "FAILED":
+        if encrypted == FAILED_MARKER:
             status = "failed"
+        elif encrypted == QUEUED_MARKER:
+            status = "queued"
         elif not encrypted:
             status = "processing"
         else:
@@ -780,6 +850,7 @@ def consultation_status_batch(audio_ids: list[int]):
     
     # Calculate summary
     status_counts = {
+        "queued": sum(1 for s in results.values() if s == "queued"),
         "processing": sum(1 for s in results.values() if s == "processing"),
         "done": sum(1 for s in results.values() if s == "done"),
         "failed": sum(1 for s in results.values() if s == "failed"),
@@ -790,6 +861,202 @@ def consultation_status_batch(audio_ids: list[int]):
         "total": len(audio_ids),
         "summary": status_counts,
         "results": results
+    }
+
+@app.post("/bulk-start-processing")
+def bulk_start_processing(
+    audio_ids: list[int],
+    background_tasks: BackgroundTasks
+):
+    if not audio_ids:
+        raise HTTPException(status_code=400, detail="No audio IDs provided")
+
+    if len(audio_ids) > 100:
+        raise HTTPException(status_code=400, detail="Maximum 100 IDs per request")
+
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        placeholders = ",".join(["%s"] * len(audio_ids))
+        cursor.execute(
+            f"""
+            SELECT audio_id, audio_file_path, transcript_encrypted
+            FROM audio_records
+            WHERE audio_id IN ({placeholders})
+            """,
+            tuple(audio_ids)
+        )
+        rows = cursor.fetchall()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    rows_by_id = {row["audio_id"]: row for row in rows}
+    started = []
+    skipped = []
+
+    update_conn = None
+    update_cursor = None
+    try:
+        update_conn = get_mysql_connection()
+        update_cursor = update_conn.cursor()
+
+        for audio_id in audio_ids:
+            row = rows_by_id.get(audio_id)
+            if not row:
+                skipped.append({"audio_id": audio_id, "reason": "not_found"})
+                continue
+
+            if row["transcript_encrypted"] != QUEUED_MARKER:
+                skipped.append({"audio_id": audio_id, "reason": "already_started"})
+                continue
+
+            update_cursor.execute(
+                """
+                UPDATE audio_records
+                SET transcript_encrypted=%s
+                WHERE audio_id=%s
+                """,
+                ("", audio_id)
+            )
+            background_tasks.add_task(
+                process_audio_pipeline,
+                audio_id,
+                row["audio_file_path"]
+            )
+            started.append(audio_id)
+
+        update_conn.commit()
+    finally:
+        if update_cursor:
+            update_cursor.close()
+        if update_conn:
+            update_conn.close()
+
+    return {
+        "started": started,
+        "skipped": skipped,
+        "count_started": len(started),
+    }
+
+
+@app.post("/bulk-remove-from-queue/{audio_id}")
+def bulk_remove_from_queue(audio_id: int):
+    """Delete a queued audio record from the queue and remove its audio file."""
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT audio_file_path, transcript_encrypted
+            FROM audio_records
+            WHERE audio_id=%s
+            """,
+            (audio_id,)
+        )
+        row = cursor.fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="Audio not found")
+
+        if row["transcript_encrypted"] != QUEUED_MARKER:
+            raise HTTPException(
+                status_code=409,
+                detail="Only queued audio can be removed from queue"
+            )
+
+        cursor.execute(
+            """
+            DELETE FROM audio_records
+            WHERE audio_id=%s
+            """,
+            (audio_id,)
+        )
+        conn.commit()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    cleanup_audio_file(row.get("audio_file_path"))
+
+    return {
+        "status": "removed",
+        "audio_id": audio_id
+    }
+
+
+@app.get("/bulk-upload-history")
+def bulk_upload_history(limit: int = 200):
+    """Return recent uploaded audio entries for bulk history view."""
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
+
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT
+                audio_id,
+                patient_id,
+                handling_clinician,
+                audio_file_path,
+                time_of_capture,
+                created_at,
+                transcript_encrypted
+            FROM audio_records
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (limit,)
+        )
+        rows = cursor.fetchall()
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    history = []
+    for row in rows:
+        encrypted = row["transcript_encrypted"]
+        if encrypted == FAILED_MARKER:
+            status = "failed"
+        elif encrypted == QUEUED_MARKER:
+            status = "queued"
+        elif not encrypted:
+            status = "processing"
+        else:
+            status = "done"
+
+        history.append(
+            {
+                "audio_id": row["audio_id"],
+                "filename": os.path.basename(row["audio_file_path"]) if row["audio_file_path"] else "",
+                "patient_id": row["patient_id"],
+                "clinician": row["handling_clinician"],
+                "status": status,
+                "time_of_capture": _to_utc_iso(row["time_of_capture"]),
+                "created_at": _to_utc_iso(row["created_at"]),
+            }
+        )
+
+    return {
+        "status": "success",
+        "count": len(history),
+        "history": history,
     }
 
 # ------------------------------------------------------------------
@@ -863,6 +1130,54 @@ async def get_consultation(
         "assessment": record["assessment"],
         "treatment_plan": record["treatment_plan"]
     }
+
+    if (
+        isinstance(transcript, list)
+        and transcript
+        and not _looks_non_clinical_transcript(transcript)
+        and not _has_meaningful_clinical_notes(clinical_notes)
+    ):
+        regen_conn = None
+        regen_cursor = None
+        try:
+            refreshed_notes = extract_clinical_notes(transcript)
+            if _has_meaningful_clinical_notes(refreshed_notes):
+                regen_conn = get_mysql_connection()
+                regen_cursor = regen_conn.cursor()
+                regen_cursor.execute(
+                    """
+                    UPDATE clinical_notes
+                    SET chief_complaint = %s,
+                        history_of_present_illness = %s,
+                        associated_diseases = %s,
+                        past_medical_history = %s,
+                        drug_history = %s,
+                        allergies = %s,
+                        assessment = %s,
+                        treatment_plan = %s
+                    WHERE audio_id = %s
+                    """,
+                    (
+                        refreshed_notes.get("chief_complaint"),
+                        refreshed_notes.get("history_of_present_illness"),
+                        refreshed_notes.get("associated_diseases"),
+                        refreshed_notes.get("past_medical_history"),
+                        refreshed_notes.get("drug_history"),
+                        refreshed_notes.get("allergies"),
+                        refreshed_notes.get("assessment"),
+                        refreshed_notes.get("treatment_plan"),
+                        record["audio_id"],
+                    ),
+                )
+                regen_conn.commit()
+                clinical_notes = refreshed_notes
+        except Exception as exc:
+            logger.warning("Failed to regenerate clinical notes for audio_id=%s: %s", record["audio_id"], exc)
+        finally:
+            if regen_cursor:
+                regen_cursor.close()
+            if regen_conn:
+                regen_conn.close()
 
     if isinstance(transcript, list) and _looks_non_clinical_transcript(transcript):
         clinical_notes = {key: None for key in clinical_notes}

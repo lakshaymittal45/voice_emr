@@ -84,12 +84,25 @@ export default function Home() {
                 Bulk Upload
               </button>
             </Link>
+
+            <Link href="/bulk-history" style={{ flex: "1", minWidth: "200px" }}>
+              <button
+                className="button-primary"
+                style={{
+                  width: "100%",
+                  background: "linear-gradient(135deg, #0f766e 0%, #0d9488 100%)",
+                }}
+              >
+                Bulk Upload History
+              </button>
+            </Link>
           </div>
 
           <div style={{ marginTop: "16px", fontSize: "14px", color: "#6b7280" }}>
             <p><strong>Live Recording:</strong> Record in real-time with live transcription</p>
             <p><strong>Single Upload:</strong> Upload one audio file at a time</p>
             <p><strong>Bulk Upload:</strong> Upload multiple files, up to 20 at once</p>
+            <p><strong>Bulk Upload History:</strong> Review uploaded files and open completed transcriptions</p>
           </div>
         </div>
       </div>

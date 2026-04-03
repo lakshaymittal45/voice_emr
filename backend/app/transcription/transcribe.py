@@ -24,31 +24,20 @@ except ImportError:
     NOISEREDUCE_AVAILABLE = False
     logging.warning("⚠️ noisereduce not installed - noise reduction disabled")
 
-# Import medical-grade configuration
-try:
-    from app.config import (
-        TRANSCRIPTION_BACKEND,
-        TRANSCRIPTION_MODELS,
-        TRANSCRIPTION_MODEL_PRIORITY,
-        TRANSCRIPTION_DEVICE,
-        AUTO_FALLBACK_ON_ERROR,
-        ENABLE_PERFORMANCE_MONITORING,
-        OVERLAP_ASSIGNMENT_THRESHOLD,
-        OVERLAP_MIN_DURATION_SEC,
-        PARALLEL_DIARIZATION_TRANSCRIPTION,
-    )
-    USE_MEDICAL_CONFIG = True
-except ImportError:
-    logging.warning("Medical config not found, using legacy configuration")
-    USE_MEDICAL_CONFIG = False
-    TRANSCRIPTION_BACKEND = "whisper"
-    TRANSCRIPTION_MODEL_PRIORITY = ["small"]
-    TRANSCRIPTION_DEVICE = "cpu"
-    AUTO_FALLBACK_ON_ERROR = True
-    ENABLE_PERFORMANCE_MONITORING = False
-    OVERLAP_ASSIGNMENT_THRESHOLD = 0.45
-    OVERLAP_MIN_DURATION_SEC = 0.30
-    PARALLEL_DIARIZATION_TRANSCRIPTION = False
+# Medical-grade configuration (same package – always available)
+from app.config import (
+    TRANSCRIPTION_BACKEND,
+    TRANSCRIPTION_MODELS,
+    TRANSCRIPTION_MODEL_PRIORITY,
+    TRANSCRIPTION_DEVICE,
+    AUTO_FALLBACK_ON_ERROR,
+    ENABLE_PERFORMANCE_MONITORING,
+    OVERLAP_ASSIGNMENT_THRESHOLD,
+    OVERLAP_MIN_DURATION_SEC,
+    PARALLEL_DIARIZATION_TRANSCRIPTION,
+    INDIC_TRANSCRIPTION_LANGUAGE,
+)
+USE_MEDICAL_CONFIG = True
 
 from app.transcription.offline_indic import (
     TranscriptSegment,
@@ -744,55 +733,52 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
 
     start_time = time.time()
     
+    # Use explicit language hint if configured, otherwise auto-detect
+    _lang_hint = INDIC_TRANSCRIPTION_LANGUAGE.strip().lower()
+    whisper_language = _lang_hint if _lang_hint not in ("auto", "") else None
+
+    # Medical vocabulary primer – helps Whisper recognise domain terms
+    _MEDICAL_INITIAL_PROMPT = (
+        "Doctor Patient consultation. Medical terms: diabetes, hypertension, "
+        "blood pressure, sugar, insulin, fever, cough, pain, headache, "
+        "prescription, tablet, injection, ECG, X-ray, MRI, CBC, thyroid, "
+        "medicine, dose, allergy, asthma, dard, bukhar, khansi, dawai, "
+        "saans, chakkar, pet dard, kamar dard, sugar level, BP, OPD."
+    )
+
     try:
         segments, info = model.transcribe(
-            audio_to_transcribe,  # Use enhanced audio for better quality
-            language=None,  # 🌏 AUTO-DETECT: Hindi, English, Punjabi, Haryanvi, etc.
-                            # Whisper supports 99+ languages including North India dialects
-                            # No configuration needed - handles code-switching (Hinglish) automatically
-            
-            task="transcribe",  # 🔤 CRITICAL: Transcribe in ORIGINAL language (not translate to English)
-                                # Hindi speech → Hindi text (Devanagari: "मेरे सिर में बहुत दर्द है")
-                                # Punjabi speech → Punjabi text (Gurmukhi: "ਮੇਰੇ ਸਿਰ")
-                                # English speech → English text ("My head hurts")
-                                # Hinglish speech → Mixed script ("My sir mein bahut pain hai")
-                                # Translation to English happens LATER in LLM extraction phase
+            audio_to_transcribe,
+            language=whisper_language,  # Use hint when configured, else auto-detect
 
-            # 🔥 CPU-OPTIMIZED SETTINGS
-            beam_size=5,  # Increased for better medical term accuracy
+            task="transcribe",  # Transcribe in ORIGINAL language (translation happens in LLM phase)
+
+            initial_prompt=_MEDICAL_INITIAL_PROMPT,  # Prime decoder with medical vocabulary
+
+            beam_size=5,
             best_of=5,
 
-            # 🛡️ ANTI-HALLUCINATION: Use fallback temperatures.
-            # If beam-search at 0.0 confidence falls below thresholds,
-            # Whisper will retry with increasing randomness to escape loops.
+            # Anti-hallucination: fallback temperatures
             temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
 
-            # 🛡️ ANTI-HALLUCINATION: Penalise repeated tokens
-            repetition_penalty=1.15,     # >1 discourages the same token again
-            no_repeat_ngram_size=4,      # Block exact 4-gram repetition
+            # Anti-hallucination: penalise repeated tokens
+            repetition_penalty=1.15,
+            no_repeat_ngram_size=4,
 
-            # 🛡️ ANTI-HALLUCINATION: Balanced quality gates
-            # ⚠️ RELAXED: Previous thresholds were TOO STRICT, causing valid speech to be rejected
-            compression_ratio_threshold=2.4,  # Default 2.4 (lenient - allows more real speech)
-            log_prob_threshold=-1.0,          # Relaxed from -0.8 (only reject very low confidence)
-            no_speech_threshold=0.6,          # Relaxed from 0.5 (less aggressive silence filtering)
+            # Balanced quality gates
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.6,
 
-            # 🛡️ ANTI-HALLUCINATION: Skip phantom text generated during silence
-            # ⚠️ DISABLED: Was causing too much valid speech to be dropped
-            # hallucination_silence_threshold=0.5,  # COMMENTED OUT - too aggressive
-
-            condition_on_previous_text=False,  # Prevents looping on prev output
+            condition_on_previous_text=False,
             word_timestamps=True,
 
-            # 🌐 Better language detection for multilingual audio
-            language_detection_segments=4,  # Use 4 segments instead of 1
+            language_detection_segments=4,
 
-            # VAD for longer audio (RELAXED PARAMETERS)
-            # ⚠️ VAD can be too aggressive - only use for very long recordings
             vad_filter=use_vad,
             vad_parameters={
-                "min_silence_duration_ms": 2000,  # Increased from 900ms to 2000ms (more lenient)
-                "threshold": 0.3  # Lower threshold = detect more speech (less aggressive filtering)
+                "min_silence_duration_ms": 2000,
+                "threshold": 0.3
             } if use_vad else None,
         )
 
@@ -824,36 +810,12 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
             logging.error(f"   Language detected: {info.language} (confidence={info.language_probability:.2f})")
         else:
             logging.info(f"📝 Generated {len(result)} segments")
-            
-            # 🔍 ENHANCED DEBUG: Log all segments for analysis
-            logging.info("🔍 DEBUG: All segments from Whisper:")
-            for i, seg in enumerate(result[:10], 1):  # Show first 10 segments
-                logging.info(f"   Segment {i}: [{seg.start:.2f}s-{seg.end:.2f}s] '{seg.text}'")
-            if len(result) > 10:
-                logging.info(f"   ... and {len(result) - 10} more segments")
-            
-            # 🔍 DEBUG: Save all segments to file for detailed analysis
-            if result and len(result) > 0:
-                import tempfile
-                debug_file = os.path.join(tempfile.gettempdir(), "whisper_debug_full.txt")
-                try:
-                    with open(debug_file, 'w', encoding='utf-8') as f:
-                        f.write(f"Audio: {audio_to_transcribe}\n")
-                        f.write(f"Duration: {duration:.2f}s\n")
-                        f.write(f"Model: {model_name}\n")
-                        f.write(f"Language: {info.language} (confidence={info.language_probability:.2f})\n")
-                        f.write(f"VAD enabled: {use_vad}\n")
-                        f.write(f"Total segments: {len(result)}\n")
-                        f.write("\n" + "="*80 + "\n")
-                        for i, seg in enumerate(result, 1):
-                            f.write(f"\nSegment {i}:\n")
-                            f.write(f"  Time: {seg.start:.2f}s - {seg.end:.2f}s\n")
-                            f.write(f"  Text: {seg.text}\n")
-                            f.write(f"  Repr: {repr(seg.text)}\n")
-                            f.write(f"  Bytes: {seg.text.encode('utf-8', errors='replace')}\n")
-                    logging.info(f"🔍 DEBUG: Full Whisper output saved to {debug_file}")
-                except Exception as e:
-                    logging.error(f"🔍 DEBUG: Failed to save debug file: {e}")
+
+            # Log first few segments for quick verification
+            for i, seg in enumerate(result[:5], 1):
+                logging.info(f"   Segment {i}: [{seg.start:.2f}s-{seg.end:.2f}s] '{seg.text[:80]}'")
+            if len(result) > 5:
+                logging.info(f"   ... and {len(result) - 5} more segments")
         
         # 🚨 HALLUCINATION FILTER: Remove hallucinated segments
         # Whisper (especially small/medium on Indic languages) tends to:
@@ -896,12 +858,16 @@ def transcribe_full_audio(audio_path: str, preferred_model: Optional[str] = None
         
         # Attempt fallback to next model if enabled
         if AUTO_FALLBACK_ON_ERROR:
-            current_idx = TRANSCRIPTION_MODEL_PRIORITY.index(model_name)
-            if current_idx < len(TRANSCRIPTION_MODEL_PRIORITY) - 1:
-                next_model = TRANSCRIPTION_MODEL_PRIORITY[current_idx + 1]
+            try:
+                current_idx = TRANSCRIPTION_MODEL_PRIORITY.index(model_name)
+            except ValueError:
+                current_idx = -1  # model_name not in priority list; try first fallback
+            next_idx = current_idx + 1
+            if next_idx < len(TRANSCRIPTION_MODEL_PRIORITY):
+                next_model = TRANSCRIPTION_MODEL_PRIORITY[next_idx]
                 logging.warning(f"🔄 Attempting fallback to {next_model}...")
                 return transcribe_full_audio(audio_path, preferred_model=next_model)
-        
+
         raise RuntimeError(f"Transcription failed: {e}")
 
 # ------------------------------------------------------------------

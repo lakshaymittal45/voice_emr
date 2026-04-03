@@ -314,17 +314,6 @@ MEDICAL_LLM_MODELS = {
         "recommended": False,
         "ram_gb": 16
     },
-    "biomedical-llama": {
-        "name": "meditron:7b",  # Medical fine-tune
-        "params": "7B",
-        "medical_performance": "good",
-        "reasoning": "moderate",
-        "speed": "fast",
-        "use_case": "Medical terminology specialist",
-        "context_window": 8192,
-        "recommended": False,
-        "ram_gb": 16
-    },
     "gemma3:4b": {
         "name": "gemma3:4b",
         "params": "4B",
@@ -435,27 +424,56 @@ MEDICAL_PROMPT_TEMPLATE = """
 You are an expert medical scribe trained in SOAP-style clinical documentation.
 
 The conversation is between a doctor and patient and may contain Hindi, English,
-Hinglish, Punjabi, or Haryanvi. Internally translate everything to English before extracting.
+Hinglish, Punjabi, Haryanvi, or other Indian languages. Internally translate
+everything to English before extracting clinical information.
 
-FIELD DEFINITIONS:
-- chief_complaint: Patient's main symptom or concern in their own words, with duration if mentioned.
-- history_of_present_illness: Narrative of onset, location, duration, character, severity, radiation, and aggravating or relieving factors.
-- associated_diseases: Active comorbidities discussed in the consultation, such as diabetes or hypertension. Do not include old resolved illnesses here.
-- past_medical_history: Prior diagnoses, surgeries, hospitalizations, or significant past illnesses.
-- drug_history: Current medications, including dose or frequency when explicitly stated.
-- allergies: Drug or food allergies, including reaction if mentioned.
-- assessment: Doctor's diagnosis, impression, or differential stated in the conversation.
-- treatment_plan: Medicines prescribed, tests ordered, referrals, advice, and follow-up instructions.
+If native-script text appears in square brackets (e.g. [native: ...])
+use it alongside the romanized text for better understanding.
+
+FIELD DEFINITIONS — populate each field ONLY when the conversation
+contains supporting evidence:
+
+- chief_complaint: The patient's primary symptom or concern in concise
+  English; include duration, onset, and severity if mentioned.
+  Example: "Severe headache for 3 days with nausea"
+
+- history_of_present_illness: A brief narrative covering onset, location,
+  duration, character, severity, radiation, timing, aggravating and
+  relieving factors, and associated symptoms — ONLY what the patient or
+  doctor actually describes.
+
+- associated_diseases: Currently active comorbidities discussed during
+  THIS consultation (e.g. diabetes, hypertension, asthma). Do NOT list
+  old resolved conditions.
+
+- past_medical_history: Prior diagnoses, surgeries, hospitalizations, or
+  significant past illnesses referenced in the conversation.
+
+- drug_history: Current medications the patient reports taking, including
+  dose and frequency ONLY when explicitly stated.
+  Example: "Metformin 500 mg twice daily | Amlodipine 5 mg once daily"
+
+- allergies: Drug or food allergies, with the type of reaction if stated.
+
+- assessment: The doctor's stated diagnosis, clinical impression, or
+  differential diagnosis. Use medical terminology.
+
+- treatment_plan: Medicines prescribed, investigations ordered, referrals,
+  lifestyle advice, and follow-up schedule.
+  Example: "Tab Paracetamol 650 mg TDS x 5 days | CBC + ESR | Follow-up in 1 week"
 
 STRICT RULES:
-1. Extract only what is explicitly stated or clearly implied by the conversation. Do not hallucinate.
-2. Negations are not findings. Examples: "no fever", "denies cough", "sugar nahi hai" should not populate positive findings.
-3. If a field has no supporting information, return null.
-4. If multiple items belong in one field, join them with " | ".
-5. Output one valid JSON object only. No markdown, no explanation, no extra keys.
-6. If the conversation is non-clinical, greeting-only, testing, or noise, return all fields as null.
+1. Extract ONLY what is explicitly stated or clearly implied. Do NOT hallucinate.
+2. Negations are NOT findings: "no fever", "denies cough" must NOT appear as
+   positive findings in any field.
+3. If a field has no supporting evidence, return null — never "None", "N/A",
+   "Not mentioned", or an empty string.
+4. Join multiple items within one field with " | ".
+5. Return one valid JSON object only. No markdown fences, no explanation.
+6. If the conversation is non-clinical (greeting-only, testing, silence,
+   or noise), return ALL fields as null.
 
-OUTPUT FORMAT:
+OUTPUT FORMAT (return exactly this structure):
 {{
   "chief_complaint": null,
   "history_of_present_illness": null,

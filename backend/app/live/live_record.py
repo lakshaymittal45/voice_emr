@@ -13,6 +13,8 @@ import asyncio
 import logging
 import subprocess
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import List, Dict, Optional
 
@@ -31,10 +33,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-try:
-    from app.config import LIVE_TRANSCRIPT_HOLDBACK_SEC
-except ImportError:
-    LIVE_TRANSCRIPT_HOLDBACK_SEC = 1.2
+# Same package – always available
+from app.config import LIVE_TRANSCRIPT_HOLDBACK_SEC
 
 # ----------------------------------------------------------------
 # 📁 Central recordings folder (shared with upload endpoint)
@@ -317,37 +317,38 @@ def _run_full_pipeline(
     if info.duration < 0.5:
         raise RuntimeError(f"Recording too short ({info.duration:.1f}s)")
 
-    # 0. Enhance audio quality (noise reduction, normalization, 16 kHz)
-    logger.info("🎙️ [Live] Step 0/5: Audio enhancement…")
-    _enhance_wav(wav_path)
+    # 0. Log file info (enhancement happens inside the transcription pipeline)
+    logger.info("🎙️ [Live] Starting full pipeline...")
 
-    # 1. Diarization + transcription
-    logger.info("🎙️ [Live] Step 1/5: Diarization + Transcription…")
+    # 1. Diarization + transcription (already parallelised internally for Whisper)
+    logger.info("🎙️ [Live] Step 1/3: Diarization + Transcription…")
+    t0 = time.perf_counter()
     segments, speaker_transcript = diarize_and_transcribe_audio(wav_path)
     if not segments:
         raise RuntimeError("Diarization returned no segments")
-    logger.info(f"   → {len(segments)} speaker segments found")
     if not speaker_transcript:
         raise RuntimeError("Empty speaker-wise transcript")
-    logger.info(f"   → {len(speaker_transcript)} transcript segments")
+    t_dt = time.perf_counter() - t0
+    logger.info(f"   → {len(segments)} speaker segs, {len(speaker_transcript)} transcript segs in {t_dt:.1f}s")
 
-    # 2. LLM clinical notes
-    logger.info("🎙️ [Live] Step 2/5: LLM extraction…")
-    clinical_notes = extract_clinical_notes(speaker_transcript)
-    logger.info(
-        f"   → chief_complaint present: "
-        f"{bool(clinical_notes.get('chief_complaint'))}"
-    )
+    # 2. LLM clinical notes ∥ Encryption  (independent → run concurrently)
+    logger.info("🎙️ [Live] Step 2/3: LLM extraction ∥ Encryption (parallel)…")
+    t1 = time.perf_counter()
 
-    # 3. Encrypt transcript
-    logger.info("🎙️ [Live] Step 3/5: Encrypting transcript…")
-    encrypted_transcript = encrypt_text(
-        json.dumps(speaker_transcript, ensure_ascii=False),
-        key,
-    )
+    transcript_json = json.dumps(speaker_transcript, ensure_ascii=False)
 
-    # 4. DB insert (single transaction)
-    logger.info("🎙️ [Live] Step 4/5: Saving to database…")
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="live_pipe") as pool:
+        llm_future = pool.submit(extract_clinical_notes, speaker_transcript)
+        encrypt_future = pool.submit(encrypt_text, transcript_json, key)
+
+        clinical_notes = llm_future.result()
+        encrypted_transcript = encrypt_future.result()
+
+    t_par = time.perf_counter() - t1
+    logger.info(f"   → LLM+Encrypt done in {t_par:.1f}s | chief_complaint={bool(clinical_notes.get('chief_complaint'))}")
+
+    # 3. DB insert (single transaction)
+    logger.info("🎙️ [Live] Step 3/3: Saving to database…")
     conn = get_mysql_connection()
     cursor = conn.cursor()
     conn.start_transaction()
@@ -360,15 +361,17 @@ def _run_full_pipeline(
                 handling_clinician,
                 time_of_capture,
                 audio_file_path,
+                audio_duration_seconds,
                 transcript_encrypted
             )
-            VALUES (%s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
             (
                 patient_id,
                 clinician,
                 datetime.now(timezone.utc),
                 wav_path,
+                round(info.duration, 2),
                 encrypted_transcript,
             ),
         )
@@ -416,7 +419,6 @@ def _run_full_pipeline(
         conn.close()
 
 
-# ------------------------------------------------------------------
 # WebSocket endpoint
 # ------------------------------------------------------------------
 
@@ -469,6 +471,12 @@ async def live_record_ws(ws: WebSocket):
             if len(audio_chunks) == 0:
                 continue
 
+            # Send a ping to keep the connection alive
+            try:
+                await ws.send_json({"type": "ping"})
+            except Exception:
+                break
+
             cycle += 1
             chunk_size = len(audio_chunks)
             logger.info(
@@ -508,14 +516,7 @@ async def live_record_ws(ws: WebSocket):
                     os.remove(tmp_wav)
                 continue
 
-            # Enhance audio before incremental transcription
-            try:
-                logger.info(f"[Incremental #{cycle}] Enhancing audio quality...")
-                _enhance_wav(tmp_wav)
-                logger.info(f"[Incremental #{cycle}] Audio enhancement complete")
-            except Exception as e:
-                logger.warning(f"[Incremental #{cycle}] Enhancement skipped: {e}")
-
+            # Audio enhancement is handled inside the transcription pipeline
             await _send_json(ws, {"type": "status", "message": "Transcribing…"})
             logger.info(f"[Incremental #{cycle}] Starting diarization + transcription pipeline...")
 
@@ -668,12 +669,8 @@ async def live_record_ws(ws: WebSocket):
                         })
                         continue
 
-                    # Enhance saved audio quality
-                    await _send_json(ws, {
-                        "type": "status",
-                        "message": "Enhancing audio quality…",
-                    })
-                    _enhance_wav(wav_path)
+                    # Audio enhancement is handled inside the transcription pipeline
+                    # (no separate _enhance_wav call needed here)
 
                     # Run full pipeline in thread pool
                     await _send_json(ws, {

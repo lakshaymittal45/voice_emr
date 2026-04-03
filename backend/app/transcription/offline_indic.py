@@ -306,11 +306,17 @@ def _is_mostly_latin(text: str) -> bool:
 
 
 def _humanize_itrans(text: str) -> str:
+    """Normalise raw ITRANS romanization to a friendlier form.
+
+    Only applies substitutions to tokens that are clearly ITRANS-encoded
+    (contain unusual uppercase characters in mid-word position).
+    English words and common abbreviations are left intact.
+    """
     if not text:
         return text
 
-    normalized = text
-    replacements = [
+    # Multi-character substitutions (safe to apply globally)
+    _MULTI_CHAR = [
         ("R^I", "ri"),
         ("R^i", "ri"),
         ("~N", "n"),
@@ -319,16 +325,40 @@ def _humanize_itrans(text: str) -> str:
         ("shh", "sh"),
         ("kSh", "ksh"),
         ("GY", "gy"),
-        ("A", "aa"),
-        ("I", "ee"),
-        ("U", "oo"),
-        ("M", "n"),
-        ("H", "h"),
     ]
 
-    for source, target in replacements:
+    # Single-character ITRANS substitutions — only apply to tokens that
+    # look like ITRANS (mixed case within a short token, not an English word)
+    _SINGLE_CHAR = {
+        "A": "aa",
+        "I": "ee",
+        "U": "oo",
+        "M": "n",
+        "H": "h",
+    }
+
+    normalized = text
+    for source, target in _MULTI_CHAR:
         normalized = normalized.replace(source, target)
 
+    # Apply single-char substitutions only within tokens that look like
+    # ITRANS-encoded Indic words (have internal uppercase letters) and
+    # are NOT common English words/abbreviations
+    tokens = normalized.split()
+    result_tokens = []
+    for token in tokens:
+        # Skip tokens that are all-uppercase (likely abbreviations: BP, ECG, MRI)
+        # or all-lowercase (already clean) or look like normal English
+        has_internal_upper = any(
+            c.isupper() for c in token[1:] if c.isalpha()
+        ) if len(token) > 1 else False
+
+        if has_internal_upper and not token.isupper():
+            for source, target in _SINGLE_CHAR.items():
+                token = token.replace(source, target)
+        result_tokens.append(token)
+
+    normalized = " ".join(result_tokens)
     normalized = re.sub(r"([a-z])\1{2,}", r"\1\1", normalized, flags=re.IGNORECASE)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     return normalized

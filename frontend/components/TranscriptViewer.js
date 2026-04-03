@@ -7,6 +7,20 @@ export default function TranscriptViewer({ transcript }) {
   const [speakerFilter, setSpeakerFilter] = useState("all");
   const [expandedItems, setExpandedItems] = useState(new Set());
 
+  // Map speaker IDs from backend (SPEAKER_00, SPEAKER_01) to human-readable labels
+  function getSpeakerDisplay(speakerId) {
+    if (!speakerId) return { label: "Speaker", badge: "SP", cssClass: "speaker-other" };
+    if (speakerId === "Doctor") return { label: "Doctor", badge: "DR", cssClass: "speaker-doctor" };
+    if (speakerId === "Patient") return { label: "Patient", badge: "PT", cssClass: "speaker-patient" };
+    if (speakerId.startsWith("SPEAKER_")) {
+      const num = parseInt(speakerId.replace("SPEAKER_", ""), 10);
+      if (num === 0) return { label: "Speaker 1", badge: "S1", cssClass: "speaker-doctor" };
+      if (num === 1) return { label: "Speaker 2", badge: "S2", cssClass: "speaker-patient" };
+      return { label: `Speaker ${num + 1}`, badge: `S${num + 1}`, cssClass: "speaker-other" };
+    }
+    return { label: speakerId, badge: speakerId.slice(0, 2).toUpperCase(), cssClass: "speaker-other" };
+  }
+
   const getDisplayText = (seg) => seg?.text_romanized || seg?.text || "-";
   const hasWordConfidence = (seg) =>
     Array.isArray(seg?.word_confidences) && seg.word_confidences.length > 0;
@@ -35,19 +49,22 @@ export default function TranscriptViewer({ transcript }) {
     );
   }
 
+  const allSpeakers = useMemo(() => {
+    const ids = [...new Set(transcript.map((s) => s.speaker).filter(Boolean))];
+    return ids.map((id) => ({ id, ...getSpeakerDisplay(id) }));
+  }, [transcript]);
+
   const stats = useMemo(() => {
     const totalWords = transcript.reduce(
       (sum, seg) => sum + getDisplayText(seg).split(/\s+/).filter((w) => w).length,
       0
     );
-    const doctorCount = transcript.filter((s) => s.speaker === "Doctor").length;
-    const patientCount = transcript.filter((s) => s.speaker === "Patient").length;
     const duration =
       transcript.length > 0
         ? transcript[transcript.length - 1].end - transcript[0].start
         : 0;
 
-    return { totalWords, doctorCount, patientCount, duration };
+    return { totalWords, duration };
   }, [transcript]);
 
   const filteredTranscript = useMemo(() => {
@@ -55,7 +72,7 @@ export default function TranscriptViewer({ transcript }) {
 
     if (speakerFilter !== "all") {
       filtered = filtered.filter(
-        (seg) => seg.speaker?.toLowerCase() === speakerFilter.toLowerCase()
+        (seg) => seg.speaker === speakerFilter
       );
     }
 
@@ -148,8 +165,11 @@ export default function TranscriptViewer({ transcript }) {
             className="speaker-filter"
           >
             <option value="all">All Speakers</option>
-            <option value="doctor">Doctor Only</option>
-            <option value="patient">Patient Only</option>
+            {allSpeakers.map((sp) => (
+              <option key={sp.id} value={sp.id}>
+                {sp.label} Only
+              </option>
+            ))}
           </select>
 
           <div className="export-dropdown">
@@ -198,19 +218,19 @@ export default function TranscriptViewer({ transcript }) {
             const displayText = getDisplayText(seg);
             const isLongText = displayText.length > 300;
 
+            const speaker = getSpeakerDisplay(seg.speaker);
+
             return (
               <div
                 key={originalIndex}
-                className={`transcript-line-enhanced ${
-                  seg.speaker === "Doctor" ? "speaker-doctor" : "speaker-patient"
-                }`}
+                className={`transcript-line-enhanced ${speaker.cssClass}`}
               >
                 <div className="transcript-header-enhanced">
                   <div className="speaker-info">
                     <span className="speaker-badge">
-                      {seg.speaker === "Doctor" ? "DR" : "SP"}
+                      {speaker.badge}
                     </span>
-                    <span className="speaker-name">{seg.speaker || "Speaker"}</span>
+                    <span className="speaker-name">{speaker.label}</span>
                     {seg.start != null && seg.end != null && (
                       <span className="timestamp-badge">
                         {formatTime(seg.start)} {"->"} {formatTime(seg.end)}

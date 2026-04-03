@@ -4,35 +4,24 @@ import logging
 import re
 import time
 from typing import List, Dict, Optional, Tuple
+import requests
 
-# Import medical-grade configuration
-try:
-    from app.config import (
-        MEDICAL_LLM_MODELS,
-        MEDICAL_LLM_PRIORITY,
-        LLM_TIMEOUT,
-        LLM_MAX_RETRIES,
-        LLM_RETRY_DELAY_BASE,
-        LLM_MIN_CALL_INTERVAL,
-        LLM_MAX_CHARS,
-        MEDICAL_PROMPT_TEMPLATE,
-        ENABLE_PERFORMANCE_MONITORING,
-        AUTO_FALLBACK_ON_ERROR,
-        ALLOW_PARTIAL_RESULTS
-    )
-    USE_MEDICAL_CONFIG = True
-except ImportError:
-    logging.warning("Medical config not found, using legacy configuration")
-    USE_MEDICAL_CONFIG = False
-    MEDICAL_LLM_PRIORITY = ["gemma3:4b", "qwen2.5:3b-instruct"]
-    LLM_TIMEOUT = 45
-    LLM_MAX_RETRIES = 3
-    LLM_RETRY_DELAY_BASE = 2
-    LLM_MIN_CALL_INTERVAL = 0.5
-    LLM_MAX_CHARS = 4000
-    ENABLE_PERFORMANCE_MONITORING = False
-    AUTO_FALLBACK_ON_ERROR = True
-    ALLOW_PARTIAL_RESULTS = True
+# Medical-grade configuration (same package – always available)
+from app.config import (
+    MEDICAL_LLM_MODELS,
+    MEDICAL_LLM_PRIORITY,
+    LLM_TIMEOUT,
+    LLM_MAX_RETRIES,
+    LLM_RETRY_DELAY_BASE,
+    LLM_MIN_CALL_INTERVAL,
+    LLM_MAX_CHARS,
+    MEDICAL_PROMPT_TEMPLATE,
+    ENABLE_PERFORMANCE_MONITORING,
+    AUTO_FALLBACK_ON_ERROR,
+    ALLOW_PARTIAL_RESULTS,
+)
+USE_MEDICAL_CONFIG = True
+OLLAMA_API_URL = "http://127.0.0.1:11434/api/generate"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -59,8 +48,9 @@ logger = logging.getLogger(__name__)
 
 # Model state tracking
 ACTIVE_LLM_MODEL = None
-LLM_MODEL_ERRORS = {}  # Track failed models
-OLLAMA_HEALTHY = None  # Cache Ollama health status
+LLM_MODEL_ERRORS = {}  # {model_name: (error_msg, timestamp)} — errors expire after TTL
+LLM_MODEL_ERROR_TTL = 600  # 10 minutes — retry failed models after this
+OLLAMA_HEALTHY = None
 last_llm_call_time = 0
 last_health_check_time = 0
 HEALTH_CHECK_INTERVAL = 300  # 5 minutes
@@ -219,16 +209,10 @@ def _format_segment_for_prompt(seg: Dict[str, str]) -> Optional[str]:
     return f"{speaker}: {text}"
 
 
-def _build_prompt(speaker_transcript: List[Dict[str, str]], use_enhanced: bool = True) -> str:
+def _build_prompt(speaker_transcript: List[Dict[str, str]]) -> str:
     """
-    Build medical-grade prompt with enhanced structure.
-    
-    Args:
-        speaker_transcript: List of speaker segments
-        use_enhanced: Use enhanced medical prompt template
-    
-    Returns:
-        Formatted prompt string
+    Build medical-grade prompt from speaker transcript.
+    Always uses the enhanced prompt template for best LLM output.
     """
     conversation_lines = []
     for segment in speaker_transcript:
@@ -238,48 +222,21 @@ def _build_prompt(speaker_transcript: List[Dict[str, str]], use_enhanced: bool =
 
     conversation = "\n".join(line for line in conversation_lines if line)
 
-    # Truncate to prevent timeout
+    # Truncate at sentence boundary to prevent timeout
     if len(conversation) > LLM_MAX_CHARS:
         logger.warning(
             "Transcript truncated for LLM prompt: %s -> %s chars",
             len(conversation),
             LLM_MAX_CHARS,
         )
-        conversation = conversation[:LLM_MAX_CHARS]
+        truncated = conversation[:LLM_MAX_CHARS]
+        # Try to cut at the last sentence/line boundary
+        last_newline = truncated.rfind("\n")
+        if last_newline > LLM_MAX_CHARS * 0.7:
+            truncated = truncated[:last_newline]
+        conversation = truncated
 
-    if USE_MEDICAL_CONFIG and use_enhanced:
-        # Use enhanced medical template
-        return MEDICAL_PROMPT_TEMPLATE.format(conversation=conversation)
-    else:
-        # Legacy prompt (simpler, for smaller models)
-        return f"""
-You are a medical documentation assistant.
-
-The conversation may contain Hindi, English, Hinglish, Punjabi, or Haryanvi.
-Internally translate to English before extracting information.
-
-IMPORTANT:
-- If no clinical information is present, return all fields as null.
-- Do NOT hallucinate.
-
-RULES:
-- Output ONE valid JSON object only
-- No explanations, no markdown, no extra text
-- Use null if information is missing
-
-Return JSON with EXACT keys:
-chief_complaint
-history_of_present_illness
-associated_diseases
-past_medical_history
-drug_history
-allergies
-assessment
-treatment_plan
-
-Conversation:
-{conversation}
-""".strip()
+    return MEDICAL_PROMPT_TEMPLATE.format(conversation=conversation)
 
 
 def _transcript_text_for_validation(speaker_transcript: List[Dict[str, str]]) -> str:
@@ -340,6 +297,7 @@ def _looks_non_clinical_transcript(speaker_transcript: List[Dict[str, str]]) -> 
 
     return False
 
+
 # ------------------------------------------------------------------
 # 🏥 Enhanced Ollama Runner with Intelligent Retry
 # ------------------------------------------------------------------
@@ -397,46 +355,54 @@ def _run_ollama(
     start_time = time.time()
     
     try:
-        result = subprocess.run(
-            ["ollama", "run", model_name],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_val
+        response = requests.post(
+            OLLAMA_API_URL,
+            json={
+                "model": model_name,
+                "prompt": prompt,
+                "stream": False,
+                "format": "json",
+                "options": {
+                    "temperature": 0,
+                    "top_p": 0.2,
+                },
+            },
+            timeout=timeout_val,
         )
-        
+
         elapsed_time = time.time() - start_time
         last_llm_call_time = time.time()
-        
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or "Unknown Ollama error"
-            logger.warning(f"❌ Ollama returned error (code={result.returncode}): {error_msg[:200]}")
+
+        if response.status_code != 200:
+            error_msg = response.text.strip() or "Unknown Ollama API error"
+            logger.warning(f"❌ Ollama returned error (status={response.status_code}): {error_msg[:200]}")
             raise RuntimeError(f"Ollama error: {error_msg}")
-        
-        response = result.stdout.strip()
-        
+
+        payload = response.json()
+        raw_response = (payload.get("response") or "").strip()
+        if not raw_response:
+            raise RuntimeError("Ollama returned an empty response body")
+
         # Performance metrics
         metrics = {
             "model": model_name,
             "elapsed_time": round(elapsed_time, 2),
-            "response_length": len(response),
+            "response_length": len(raw_response),
             "retry_count": retry_count,
             "success": True
         }
-        
+
         if ENABLE_PERFORMANCE_MONITORING:
             logger.info(
                 f"✅ LLM response received | "
                 f"model={model_name} | "
                 f"time={elapsed_time:.2f}s | "
-                f"length={len(response)} chars"
+                f"length={len(raw_response)} chars"
             )
-        
-        return response, metrics
-        
-    except subprocess.TimeoutExpired:
+
+        return raw_response, metrics
+
+    except requests.Timeout:
         elapsed_time = time.time() - start_time
         error_msg = f"Ollama timeout after {elapsed_time:.1f}s (limit: {timeout_val}s)"
         logger.warning(f"⏱️ {error_msg}")
@@ -509,8 +475,23 @@ def _safe_parse_json(raw: str, strict: bool = False) -> Tuple[Dict, bool]:
         if not expected_keys.issubset(actual_keys):
             missing = expected_keys - actual_keys
             logger.warning(f"Missing fields in LLM response: {missing}")
-            # Fill missing fields
             for key in missing:
+                parsed[key] = None
+        
+        # Post-process: clean non-null values that are actually empty
+        _EMPTY_PATTERNS = {
+            "n/a", "na", "none", "nil", "null", "not mentioned",
+            "not available", "not stated", "not applicable",
+            "none mentioned", "none stated", "none reported",
+            "no information", "no data", "no information available",
+            "-", "--", "---", ".",
+        }
+        for key in list(parsed.keys()):
+            value = parsed[key]
+            if value is None:
+                continue
+            cleaned = str(value).strip()
+            if not cleaned or cleaned.lower() in _EMPTY_PATTERNS:
                 parsed[key] = None
         
         # Check if we got useful data
@@ -580,8 +561,8 @@ def extract_clinical_notes(
         else:
             raise RuntimeError("Ollama is not available")
 
-    # Build prompt optimized for conversation length
-    prompt = _build_prompt(speaker_transcript, use_enhanced=True)
+    # Build prompt
+    prompt = _build_prompt(speaker_transcript)
     logger.info(f"📝 Built prompt | length={len(prompt)} chars | segments={len(speaker_transcript)}")
 
     # Determine model priority
@@ -598,15 +579,21 @@ def extract_clinical_notes(
     
     # Try each model in priority order
     for idx, model_name in enumerate(models_to_try):
-        # Skip if previously marked as unavailable
+        # Skip if previously marked as unavailable (with TTL – retry after expiry)
         if model_name in LLM_MODEL_ERRORS:
-            logger.debug(f"Skipping {model_name} (previously failed: {LLM_MODEL_ERRORS[model_name][:50]})")
-            continue
+            error_msg, error_time = LLM_MODEL_ERRORS[model_name]
+            if time.time() - error_time < LLM_MODEL_ERROR_TTL:
+                logger.debug(f"Skipping {model_name} (failed {int(time.time() - error_time)}s ago: {error_msg[:50]})")
+                continue
+            else:
+                # TTL expired — retry this model
+                logger.info(f"🔄 Retrying previously failed model {model_name} (TTL expired)")
+                del LLM_MODEL_ERRORS[model_name]
         
         # Check if model is installed
         if not check_model_availability(model_name):
             error = f"Model not installed"
-            LLM_MODEL_ERRORS[model_name] = error
+            LLM_MODEL_ERRORS[model_name] = (error, time.time())
             logger.warning(f"❌ {model_name}: {error}. Install with: ollama pull {model_name}")
             
             # For recommended models, show clear installation message
@@ -622,19 +609,7 @@ def extract_clinical_notes(
         try:
             logger.info(f"🧠 Attempting model {idx+1}/{len(models_to_try)}: {model_name}")
             
-            # Use enhanced prompt for larger models, simpler for smaller ones
-            use_enhanced_prompt = (
-                USE_MEDICAL_CONFIG and 
-                model_name in MEDICAL_LLM_MODELS and 
-                MEDICAL_LLM_MODELS[model_name].get("params", "").endswith("B") and
-                not model_name.endswith(":3b")
-            )
-            
-            if not use_enhanced_prompt and idx > 0:
-                # Rebuild with simpler prompt for smaller models
-                prompt = _build_prompt(speaker_transcript, use_enhanced=False)
-            
-            # Run LLM
+            # Run LLM with the enhanced prompt
             raw_response, metrics = _run_ollama(model_name, prompt)
             all_metrics.append(metrics)
             
@@ -671,7 +646,7 @@ def extract_clinical_notes(
             
         except Exception as e:
             error_msg = str(e)[:200]
-            LLM_MODEL_ERRORS[model_name] = error_msg
+            LLM_MODEL_ERRORS[model_name] = (error_msg, time.time())
             logger.error(f"❌ {model_name} failed: {error_msg}")
             
             # Try next model if available

@@ -12,10 +12,8 @@ try:
 except ImportError:
     librosa = None
 
-try:
-    from app.config import DIARIZATION_MERGE_GAP_SEC
-except ImportError:
-    DIARIZATION_MERGE_GAP_SEC = 0.35
+# Same package – always available
+from app.config import DIARIZATION_MERGE_GAP_SEC
 
 # ------------------------------------------------------------------
 # Setup
