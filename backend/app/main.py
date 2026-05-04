@@ -89,6 +89,15 @@ from contextlib import asynccontextmanager
 async def lifespan(app_instance):
     """Startup and shutdown lifecycle for the FastAPI app."""
     logger.info("Voice EMR Backend starting up...")
+    
+    # Run database migrations on startup
+    try:
+        from app.db.migrations import run_startup_migrations
+        run_startup_migrations()
+    except Exception as e:
+        logger.error(f"Startup migrations failed: {e}")
+        raise
+    
     yield
     # Shutdown
     logger.info("Shutting down Voice EMR Backend...")
@@ -110,7 +119,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -1220,12 +1229,107 @@ async def get_consultation(
     if isinstance(transcript, list) and _looks_non_clinical_transcript(transcript):
         clinical_notes = {key: None for key in clinical_notes}
 
+    # 🔐 Decrypt corrected transcript (if exists)
+    transcript_corrected = None
+    corrected_encrypted = record.get("transcript_corrected_encrypted")
+    if corrected_encrypted:
+        corrected_decrypted = decrypt_text(corrected_encrypted, AES_KEY)
+        if corrected_decrypted:
+            try:
+                transcript_corrected = json.loads(corrected_decrypted)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Failed to parse corrected transcript JSON for audio_id=%s", audio_id)
+                transcript_corrected = None
+            if isinstance(transcript_corrected, list):
+                transcript_corrected = hydrate_transcript_variants(transcript_corrected)
+
     return {
         "audio_id": record["audio_id"],
         "patient_id": record["patient_id"],
         "clinician": record["handling_clinician"],
         "transcript": transcript,
+        "transcript_corrected": transcript_corrected,
         "clinical_notes": clinical_notes
+    }
+
+# ------------------------------------------------------------------
+# ✏️ Save Doctor-Corrected Transcript
+# ------------------------------------------------------------------
+
+from pydantic import BaseModel
+from typing import List, Optional, Any
+
+class CorrectedTranscriptPayload(BaseModel):
+    transcript_corrected: List[Any]
+
+@app.put("/consultation/{audio_id}/transcript")
+async def save_corrected_transcript(
+    audio_id: int,
+    payload: CorrectedTranscriptPayload,
+    role: str = Query("doctor")
+):
+    """Save a doctor-corrected transcript alongside the raw AI transcript."""
+    if role not in ["doctor", "admin"]:
+        raise HTTPException(status_code=403, detail="Unauthorized")
+
+    # Verify the audio record exists
+    conn = None
+    cursor = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT audio_id FROM audio_records WHERE audio_id=%s",
+            (audio_id,)
+        )
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Audio record not found")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+    # Encrypt and save the corrected transcript
+    corrected_json = json.dumps(payload.transcript_corrected, ensure_ascii=False)
+    encrypted_corrected = encrypt_text(corrected_json, AES_KEY)
+
+    save_conn = None
+    save_cursor = None
+    try:
+        save_conn = get_mysql_connection()
+        save_cursor = save_conn.cursor()
+        save_cursor.execute(
+            """
+            UPDATE audio_records
+            SET transcript_corrected_encrypted = %s
+            WHERE audio_id = %s
+            """,
+            (encrypted_corrected, audio_id)
+        )
+        save_conn.commit()
+        logger.info(f"Corrected transcript saved for audio_id={audio_id}")
+    except Exception as db_error:
+        error_str = str(db_error)
+        if "Unknown column" in error_str and "transcript_corrected_encrypted" in error_str:
+            logger.warning(
+                f"Column 'transcript_corrected_encrypted' not found. "
+                f"Run migration: backend/app/db/migration_add_corrected_transcript.sql"
+            )
+            # Feature not available yet - gracefully skip
+        else:
+            logger.error(f"Failed to save corrected transcript for audio_id={audio_id}: {db_error}")
+            raise HTTPException(status_code=500, detail="Failed to save corrected transcript")
+    finally:
+        if save_cursor:
+            save_cursor.close()
+        if save_conn:
+            save_conn.close()
+
+    return {
+        "status": "saved",
+        "audio_id": audio_id,
+        "message": "Corrected transcript saved successfully"
     }
 
 # ------------------------------------------------------------------
@@ -1504,6 +1608,7 @@ def root():
             "status": "/consultation-status/{audio_id}",
             "batch_status": "/consultation-status-batch",
             "retrieve": "/consultation/{audio_id}",
+            "save_corrected_transcript": "/consultation/{audio_id}/transcript [PUT]",
             "patients": "/patients",
             "patient_appointments": "/patient/{patient_id}/appointments",
             "health": "/health",

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS audio_records (
     audio_duration_seconds DECIMAL(10,2),
 
     transcript_encrypted TEXT NOT NULL,
+    transcript_corrected_encrypted TEXT DEFAULT NULL,
 
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

@@ -17,6 +17,7 @@ CREATE TABLE audio_records (
     audio_duration_seconds DECIMAL(10,2),
 
     transcript_encrypted CLOB NOT NULL,
+    transcript_corrected_encrypted CLOB DEFAULT NULL,
 
     created_at TIMESTAMP DEFAULT CURRENT TIMESTAMP
 );
