@@ -196,3 +196,23 @@ export async function fetchBulkUploadHistory(limit = 200) {
     history,
   };
 }
+
+export async function saveCorrectedTranscript(audioId, transcriptCorrected, role = "doctor") {
+  const res = await fetch(
+    `${API_BASE}/consultation/${audioId}/transcript?role=${role}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ transcript_corrected: transcriptCorrected }),
+    }
+  );
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(err);
+  }
+
+  return res.json();
+}

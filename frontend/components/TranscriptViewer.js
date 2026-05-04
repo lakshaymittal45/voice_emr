@@ -1,11 +1,32 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useCallback } from "react";
 
-export default function TranscriptViewer({ transcript }) {
+export default function TranscriptViewer({
+  transcript,
+  transcriptCorrected,
+  audioId,
+  onSaveCorrected,
+}) {
   const [searchQuery, setSearchQuery] = useState("");
   const [speakerFilter, setSpeakerFilter] = useState("all");
   const [expandedItems, setExpandedItems] = useState(new Set());
+
+  // ── Edit mode state ──
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedSegments, setEditedSegments] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState(null); // "saved" | "error"
+  const [viewMode, setViewMode] = useState("corrected"); // "raw" | "corrected"
+
+  const hasCorrected = Array.isArray(transcriptCorrected) && transcriptCorrected.length > 0;
+
+  // The active transcript shown (corrected if available and viewMode is corrected)
+  const activeTranscript = useMemo(() => {
+    if (isEditing && editedSegments) return editedSegments;
+    if (viewMode === "corrected" && hasCorrected) return transcriptCorrected;
+    return transcript;
+  }, [isEditing, editedSegments, viewMode, hasCorrected, transcriptCorrected, transcript]);
 
   // Map speaker IDs from backend (SPEAKER_00, SPEAKER_01) to human-readable labels
   function getSpeakerDisplay(speakerId) {
@@ -24,6 +45,52 @@ export default function TranscriptViewer({ transcript }) {
   const getDisplayText = (seg) => seg?.text_romanized || seg?.text || "-";
   const hasWordConfidence = (seg) =>
     Array.isArray(seg?.word_confidences) && seg.word_confidences.length > 0;
+
+  // ── Edit handlers ──
+  const handleStartEdit = useCallback(() => {
+    // Start from the corrected version if it exists, else from raw
+    const base = hasCorrected ? transcriptCorrected : transcript;
+    setEditedSegments(JSON.parse(JSON.stringify(base))); // deep clone
+    setIsEditing(true);
+    setSaveStatus(null);
+  }, [transcript, transcriptCorrected, hasCorrected]);
+
+  const handleCancelEdit = useCallback(() => {
+    setIsEditing(false);
+    setEditedSegments(null);
+    setSaveStatus(null);
+  }, []);
+
+  const handleSegmentTextChange = useCallback((index, newText) => {
+    setEditedSegments((prev) => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index] };
+      // Update the primary text field
+      if (updated[index].text_romanized) {
+        updated[index].text_romanized = newText;
+      } else {
+        updated[index].text = newText;
+      }
+      return updated;
+    });
+  }, []);
+
+  const handleSaveEdit = useCallback(async () => {
+    if (!onSaveCorrected || !editedSegments) return;
+    setSaving(true);
+    setSaveStatus(null);
+    try {
+      await onSaveCorrected(editedSegments);
+      setSaveStatus("saved");
+      setIsEditing(false);
+      // Don't clear editedSegments — parent will reload data
+    } catch (err) {
+      console.error("Failed to save corrected transcript:", err);
+      setSaveStatus("error");
+    } finally {
+      setSaving(false);
+    }
+  }, [onSaveCorrected, editedSegments]);
 
   if (!transcript || transcript.length === 0) {
     return (
@@ -50,25 +117,28 @@ export default function TranscriptViewer({ transcript }) {
   }
 
   const allSpeakers = useMemo(() => {
-    const ids = [...new Set(transcript.map((s) => s.speaker).filter(Boolean))];
+    const src = activeTranscript || transcript;
+    const ids = [...new Set(src.map((s) => s.speaker).filter(Boolean))];
     return ids.map((id) => ({ id, ...getSpeakerDisplay(id) }));
-  }, [transcript]);
+  }, [activeTranscript, transcript]);
 
   const stats = useMemo(() => {
-    const totalWords = transcript.reduce(
+    const src = activeTranscript || transcript;
+    const totalWords = src.reduce(
       (sum, seg) => sum + getDisplayText(seg).split(/\s+/).filter((w) => w).length,
       0
     );
     const duration =
-      transcript.length > 0
-        ? transcript[transcript.length - 1].end - transcript[0].start
+      src.length > 0
+        ? src[src.length - 1].end - src[0].start
         : 0;
 
     return { totalWords, duration };
-  }, [transcript]);
+  }, [activeTranscript, transcript]);
 
   const filteredTranscript = useMemo(() => {
-    let filtered = transcript;
+    const src = activeTranscript || transcript;
+    let filtered = src;
 
     if (speakerFilter !== "all") {
       filtered = filtered.filter(
@@ -86,11 +156,12 @@ export default function TranscriptViewer({ transcript }) {
     }
 
     return filtered;
-  }, [transcript, speakerFilter, searchQuery]);
+  }, [activeTranscript, transcript, speakerFilter, searchQuery]);
 
   const handleExport = (format) => {
+    const src = activeTranscript || transcript;
     if (format === "txt") {
-      const text = transcript
+      const text = src
         .map(
           (seg) =>
             `[${formatTime(seg.start)} - ${formatTime(seg.end)}] ${seg.speaker}: ${getDisplayText(seg)}`
@@ -98,13 +169,14 @@ export default function TranscriptViewer({ transcript }) {
         .join("\n\n");
       downloadFile(text, "transcript.txt", "text/plain");
     } else if (format === "json") {
-      const json = JSON.stringify(transcript, null, 2);
+      const json = JSON.stringify(src, null, 2);
       downloadFile(json, "transcript.json", "application/json");
     }
   };
 
   const handleCopyAll = () => {
-    const text = transcript
+    const src = activeTranscript || transcript;
+    const text = src
       .map((seg) => `${seg.speaker}: ${getDisplayText(seg)}`)
       .join("\n\n");
     navigator.clipboard.writeText(text);
@@ -130,7 +202,7 @@ export default function TranscriptViewer({ transcript }) {
             <span className="stat-label">Words</span>
           </div>
           <div className="stat-item">
-            <span className="stat-value">{transcript.length}</span>
+            <span className="stat-value">{(activeTranscript || transcript).length}</span>
             <span className="stat-label">Segments</span>
           </div>
           <div className="stat-item">
@@ -184,6 +256,74 @@ export default function TranscriptViewer({ transcript }) {
         </div>
       </div>
 
+      {/* ── Version Toggle + Edit Controls ── */}
+      <div className="transcript-edit-toolbar">
+        <div className="transcript-version-toggle">
+          {hasCorrected && !isEditing && (
+            <>
+              <button
+                className={`version-btn ${viewMode === "corrected" ? "active" : ""}`}
+                onClick={() => setViewMode("corrected")}
+              >
+                ✏️ Corrected
+              </button>
+              <button
+                className={`version-btn ${viewMode === "raw" ? "active" : ""}`}
+                onClick={() => setViewMode("raw")}
+              >
+                🤖 Raw AI
+              </button>
+            </>
+          )}
+          {!hasCorrected && !isEditing && (
+            <span className="version-label">🤖 AI Transcript</span>
+          )}
+          {isEditing && (
+            <span className="version-label editing-label">✏️ Editing Mode</span>
+          )}
+        </div>
+
+        <div className="transcript-edit-actions">
+          {!isEditing ? (
+            <button
+              className="edit-transcript-btn"
+              onClick={handleStartEdit}
+              title="Edit transcript"
+            >
+              ✏️ Edit Transcript
+            </button>
+          ) : (
+            <>
+              <button
+                className="edit-save-btn"
+                onClick={handleSaveEdit}
+                disabled={saving}
+              >
+                {saving ? "Saving..." : "💾 Save Corrections"}
+              </button>
+              <button
+                className="edit-cancel-btn"
+                onClick={handleCancelEdit}
+                disabled={saving}
+              >
+                ✕ Cancel
+              </button>
+            </>
+          )}
+        </div>
+
+        {saveStatus === "saved" && (
+          <div className="save-status save-success">
+            ✅ Corrected transcript saved successfully!
+          </div>
+        )}
+        {saveStatus === "error" && (
+          <div className="save-status save-error">
+            ❌ Failed to save. Please try again.
+          </div>
+        )}
+      </div>
+
       <div
         className="consultation-word-legend"
         style={{
@@ -203,7 +343,7 @@ export default function TranscriptViewer({ transcript }) {
 
       {searchQuery && (
         <div className="search-results-info">
-          Showing {filteredTranscript.length} of {transcript.length} segments
+          Showing {filteredTranscript.length} of {(activeTranscript || transcript).length} segments
           {filteredTranscript.length === 0 && " - No matches found"}
         </div>
       )}
@@ -213,7 +353,8 @@ export default function TranscriptViewer({ transcript }) {
           <p className="empty-text">No matching segments found.</p>
         ) : (
           filteredTranscript.map((seg) => {
-            const originalIndex = transcript.indexOf(seg);
+            const src = activeTranscript || transcript;
+            const originalIndex = src.indexOf(seg);
             const isExpanded = expandedItems.has(originalIndex);
             const displayText = getDisplayText(seg);
             const isLongText = displayText.length > 300;
@@ -223,7 +364,7 @@ export default function TranscriptViewer({ transcript }) {
             return (
               <div
                 key={originalIndex}
-                className={`transcript-line-enhanced ${speaker.cssClass}`}
+                className={`transcript-line-enhanced ${speaker.cssClass} ${isEditing ? "editing" : ""}`}
               >
                 <div className="transcript-header-enhanced">
                   <div className="speaker-info">
@@ -248,23 +389,34 @@ export default function TranscriptViewer({ transcript }) {
                   )}
                 </div>
 
-                <p
-                  className={`transcript-text-enhanced ${
-                    !isExpanded && isLongText ? "truncated" : ""
-                  }`}
-                >
-                  {hasWordConfidence(seg) && !searchQuery.trim()
-                    ? renderWordConfidence(seg.word_confidences)
-                    : highlightSearch(displayText, searchQuery)}
-                </p>
+                {isEditing ? (
+                  <textarea
+                    className="transcript-edit-textarea"
+                    value={displayText}
+                    onChange={(e) =>
+                      handleSegmentTextChange(originalIndex, e.target.value)
+                    }
+                    rows={Math.max(2, Math.ceil(displayText.length / 80))}
+                  />
+                ) : (
+                  <p
+                    className={`transcript-text-enhanced ${
+                      !isExpanded && isLongText ? "truncated" : ""
+                    }`}
+                  >
+                    {hasWordConfidence(seg) && !searchQuery.trim()
+                      ? renderWordConfidence(seg.word_confidences)
+                      : highlightSearch(displayText, searchQuery)}
+                  </p>
+                )}
 
-                {seg.text_native && seg.text_native !== displayText && (
+                {!isEditing && seg.text_native && seg.text_native !== displayText && (
                   <p className="transcript-text-enhanced" style={{ opacity: 0.68 }}>
                     {seg.text_native}
                   </p>
                 )}
 
-                {isLongText && (
+                {!isEditing && isLongText && (
                   <button
                     onClick={() => toggleExpand(originalIndex)}
                     className="expand-btn"

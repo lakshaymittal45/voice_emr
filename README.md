@@ -124,6 +124,7 @@ python -m venv venv
 
 # Windows
 venv\Scripts\activate
+.\venv\Scripts\Activate.ps1
 # Linux / Mac
 source venv/bin/activate
 

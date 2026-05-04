@@ -5,6 +5,7 @@ import { useParams, useSearchParams, useRouter } from "next/navigation";
 
 import TranscriptViewer from "@/components/TranscriptViewer";
 import ClinicalNotes from "@/components/ClinicalNotes";
+import { saveCorrectedTranscript } from "@/lib/api";
 
 export default function ConsultationPage() {
   const params = useParams();
@@ -44,6 +45,23 @@ export default function ConsultationPage() {
 
     fetchConsultation();
   }, [API_BASE, audioId, role]);
+
+  async function refetchConsultation() {
+    try {
+      const res = await fetch(
+        `${API_BASE}/consultation/${audioId}?role=${encodeURIComponent(role)}`
+      );
+      if (!res.ok) throw new Error("Failed to fetch consultation");
+      setData(await res.json());
+    } catch (err) {
+      console.error("Refetch failed:", err);
+    }
+  }
+
+  const handleSaveCorrected = async (correctedSegments) => {
+    await saveCorrectedTranscript(audioId, correctedSegments, role);
+    await refetchConsultation();
+  };
 
   useEffect(() => {
     const handleScroll = () => {
@@ -283,7 +301,12 @@ export default function ConsultationPage() {
             {(activeTab === "transcript" || activeTab === "both") && (
               <section className="section">
                 {activeTab === "both" && <h2 className="section-title">Conversation Transcript</h2>}
-                <TranscriptViewer transcript={data.transcript} />
+                <TranscriptViewer
+                  transcript={data.transcript}
+                  transcriptCorrected={data.transcript_corrected}
+                  audioId={audioId}
+                  onSaveCorrected={handleSaveCorrected}
+                />
               </section>
             )}
 
