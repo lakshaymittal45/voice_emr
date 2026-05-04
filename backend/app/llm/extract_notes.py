@@ -48,9 +48,10 @@ logger = logging.getLogger(__name__)
 
 # Model state tracking
 ACTIVE_LLM_MODEL = None
-LLM_MODEL_ERRORS = {}  # {model_name: (error_msg, timestamp)} — errors expire after TTL
-LLM_MODEL_ERROR_TTL = 600  # 10 minutes — retry failed models after this
+LLM_MODEL_ERRORS = {}  # {model_name: (error_msg, timestamp)} -- errors expire after TTL
+LLM_MODEL_ERROR_TTL = 600  # 10 minutes -- retry failed models after this
 OLLAMA_HEALTHY = None
+_OLLAMA_AVAILABLE_MODELS = set()  # Cached set of installed model names
 last_llm_call_time = 0
 last_health_check_time = 0
 HEALTH_CHECK_INTERVAL = 300  # 5 minutes
@@ -126,8 +127,9 @@ def _ollama_available() -> bool:
     """
     Check if Ollama is running and healthy.
     Uses caching to reduce overhead for mass processing.
+    Also caches the available model list to avoid repeated subprocess calls.
     """
-    global OLLAMA_HEALTHY, last_health_check_time
+    global OLLAMA_HEALTHY, last_health_check_time, _OLLAMA_AVAILABLE_MODELS
     
     # Use cached result if recent
     current_time = time.time()
@@ -147,11 +149,12 @@ def _ollama_available() -> bool:
         last_health_check_time = current_time
         
         if OLLAMA_HEALTHY:
-            # Log available models
+            # Cache available models (avoids repeated subprocess calls)
             models = result.stdout.strip().split('\n')
-            available_models = [m.split()[0] for m in models[1:] if m.strip()]
-            logger.info(f"Ollama healthy | Available models: {len(available_models)}")
+            _OLLAMA_AVAILABLE_MODELS = {m.split()[0] for m in models[1:] if m.strip()}
+            logger.info(f"Ollama healthy | Available models: {len(_OLLAMA_AVAILABLE_MODELS)}")
         else:
+            _OLLAMA_AVAILABLE_MODELS = set()
             logger.warning("Ollama not responding properly")
         
         return OLLAMA_HEALTHY
@@ -159,11 +162,20 @@ def _ollama_available() -> bool:
     except Exception as e:
         logger.error(f"Ollama health check failed: {e}")
         OLLAMA_HEALTHY = False
+        _OLLAMA_AVAILABLE_MODELS = set()
         last_health_check_time = current_time
         return False
 
 def check_model_availability(model_name: str) -> bool:
-    """Check if a specific model is installed in Ollama."""
+    """Check if a specific model is installed in Ollama (uses cached list)."""
+    # Use cached model list from _ollama_available() -- much faster than subprocess per model
+    if _OLLAMA_AVAILABLE_MODELS:
+        is_available = model_name in _OLLAMA_AVAILABLE_MODELS
+        if not is_available:
+            logger.debug(f"Model {model_name} not found in Ollama. Install with: ollama pull {model_name}")
+        return is_available
+    
+    # Fallback: query directly if cache is empty
     try:
         result = subprocess.run(
             ["ollama", "list"],
@@ -173,14 +185,8 @@ def check_model_availability(model_name: str) -> bool:
         )
         
         if result.returncode == 0:
-            # Parse model list
-            available = [line.split()[0] for line in result.stdout.split('\n')[1:] if line.strip()]
-            is_available = model_name in available
-            
-            if not is_available:
-                logger.debug(f"Model {model_name} not found in Ollama. Install with: ollama pull {model_name}")
-            
-            return is_available
+            available = {line.split()[0] for line in result.stdout.split('\n')[1:] if line.strip()}
+            return model_name in available
         
         return False
         

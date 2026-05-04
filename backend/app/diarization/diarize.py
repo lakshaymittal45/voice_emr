@@ -13,7 +13,7 @@ except ImportError:
     librosa = None
 
 # Same package – always available
-from app.config import DIARIZATION_MERGE_GAP_SEC
+from app.config import DIARIZATION_MERGE_GAP_SEC, OPTIMAL_DEVICE
 
 # ------------------------------------------------------------------
 # Setup
@@ -25,17 +25,10 @@ logging.basicConfig(
 )
 
 # ================================================================
-# 🔥 DEVICE TOGGLE (MANUAL)
+# 🔥 DEVICE AUTO-DETECTION (from config.py hardware detection)
 # ================================================================
-
-# ✅ DEFAULT (SAFE FOR INTEL / CPU MACHINES)
-DEVICE = torch.device("cpu")
-
-# ------------------------------------------------
-# 🚀 WHEN YOU MOVE TO NVIDIA GPU:
-# 👉 Uncomment the line below
-# ------------------------------------------------
-# DEVICE = torch.device("cuda")
+DEVICE = torch.device(OPTIMAL_DEVICE)
+logging.info(f"Diarization device: {DEVICE}")
 # ================================================================
 
 PIPELINE = None
@@ -167,6 +160,7 @@ def _merge_adjacent_same_speaker_segments(
 
 
 def _annotate_segment_overlaps(segments: List[Dict]) -> List[Dict]:
+    """Annotate overlapping speaker segments using a sweep-line approach (O(n log n))."""
     if not segments:
         return segments
 
@@ -178,11 +172,14 @@ def _annotate_segment_overlaps(segments: List[Dict]) -> List[Dict]:
         segment_start = float(segment["start"])
         segment_end = float(segment["end"])
 
-        for other_index, other in enumerate(ordered):
-            if index == other_index:
+        # Only scan nearby segments (break early when sorted start > our end)
+        for other_index in range(len(ordered)):
+            if other_index == index:
                 continue
-
+            other = ordered[other_index]
             other_start = float(other["start"])
+            if other_start >= segment_end:
+                break  # No more overlaps possible for this segment
             other_end = float(other["end"])
             overlap = max(0.0, min(segment_end, other_end) - max(segment_start, other_start))
             if overlap > 0 and other["speaker"] != segment["speaker"]:

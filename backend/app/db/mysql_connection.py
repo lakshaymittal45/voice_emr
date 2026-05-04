@@ -73,3 +73,32 @@ def close_connection_pool():
             logger.info("Connection pool closed")
         except Exception as e:
             logger.error(f"Error closing connection pool: {e}")
+
+
+# ------------------------------------------------------------------
+# Context manager for safe connection handling
+# ------------------------------------------------------------------
+
+from contextlib import contextmanager
+
+@contextmanager
+def get_db_connection():
+    """Context manager that auto-closes the MySQL connection.
+
+    Usage::
+
+        with get_db_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute("SELECT 1")
+            cursor.close()
+        # conn is ALWAYS returned to the pool, even on exception
+    """
+    conn = get_mysql_connection()
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+

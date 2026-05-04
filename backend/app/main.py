@@ -17,7 +17,7 @@ import soundfile as sf
 from app.transcription.offline_indic import hydrate_transcript_variants
 from app.transcription.transcribe import diarize_and_transcribe_audio
 from app.llm.extract_notes import extract_clinical_notes, _looks_non_clinical_transcript
-from app.db.mysql_connection import get_mysql_connection
+from app.db.mysql_connection import get_mysql_connection, get_db_connection
 from app.encryption.aes_encrypt import encrypt_text, decrypt_text
 from app.live.live_record import router as live_record_router
 
@@ -80,7 +80,26 @@ logging.getLogger("speechbrain").setLevel(logging.WARNING)
 logging.getLogger("pyannote").setLevel(logging.WARNING)
 logging.getLogger("torchaudio").setLevel(logging.WARNING)
 
-app = FastAPI(title="Voice EMR Backend")
+# ------------------------------------------------------------------
+# Lifespan handler (replaces deprecated @app.on_event)
+# ------------------------------------------------------------------
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app_instance):
+    """Startup and shutdown lifecycle for the FastAPI app."""
+    logger.info("Voice EMR Backend starting up...")
+    yield
+    # Shutdown
+    logger.info("Shutting down Voice EMR Backend...")
+    try:
+        from app.db.mysql_connection import close_connection_pool
+        close_connection_pool()
+        logger.info("Database connections closed")
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
+
+app = FastAPI(title="Voice EMR Backend", lifespan=lifespan)
 
 # CORS: read allowed origins from env var (comma-separated list)
 # Example in .env: CORS_ORIGINS=http://localhost:3000,https://yourdomain.com
@@ -250,102 +269,107 @@ def process_audio_pipeline(audio_id: int, audio_path: str):
             llm_future = pool.submit(extract_clinical_notes, speaker_transcript)
             encrypt_future = pool.submit(encrypt_text, transcript_json, AES_KEY)
 
-            clinical_notes = llm_future.result()
-            encrypted_transcript = encrypt_future.result()
+            # ENH 4: Timeout guard — prevent stuck pipelines if LLM hangs
+            clinical_notes = llm_future.result(timeout=180)  # 3 min max for LLM
+            encrypted_transcript = encrypt_future.result(timeout=30)
 
         t_parallel = time.perf_counter() - t1
         logger.info(f"[{audio_id}]   → LLM+Encrypt done in {t_parallel:.1f}s")
 
-        # 3️⃣ Update DB with atomic transaction
+        # 3️⃣ Update DB with atomic transaction + retry (ENH 6)
         logger.info(f"[{audio_id}] Step 3/3: DB storage...")
-        conn = get_mysql_connection()
-        cursor = conn.cursor()
+        db_saved = False
+        for db_attempt in range(3):
+            conn = None
+            cursor = None
+            try:
+                conn = get_mysql_connection()
+                cursor = conn.cursor()
+                conn.start_transaction()
 
-        # Start transaction
-        conn.start_transaction()
-
-        try:
-            cursor.execute(
-                """
-                UPDATE audio_records
-                SET transcript_encrypted=%s
-                WHERE audio_id=%s
-                """,
-                (encrypted_transcript, audio_id)
-            )
-
-            cursor.execute(
-                """
-                INSERT INTO clinical_notes (
-                    audio_id,
-                    handling_clinician,
-                    chief_complaint,
-                    history_of_present_illness,
-                    associated_diseases,
-                    past_medical_history,
-                    drug_history,
-                    allergies,
-                    assessment,
-                    treatment_plan
+                cursor.execute(
+                    """
+                    UPDATE audio_records
+                    SET transcript_encrypted=%s
+                    WHERE audio_id=%s
+                    """,
+                    (encrypted_transcript, audio_id)
                 )
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                (
-                    audio_id,
-                    "system",
-                    clinical_notes.get("chief_complaint"),
-                    clinical_notes.get("history_of_present_illness"),
-                    clinical_notes.get("associated_diseases"),
-                    clinical_notes.get("past_medical_history"),
-                    clinical_notes.get("drug_history"),
-                    clinical_notes.get("allergies"),
-                    clinical_notes.get("assessment"),
-                    clinical_notes.get("treatment_plan"),
+
+                cursor.execute(
+                    """
+                    INSERT INTO clinical_notes (
+                        audio_id,
+                        handling_clinician,
+                        chief_complaint,
+                        history_of_present_illness,
+                        associated_diseases,
+                        past_medical_history,
+                        drug_history,
+                        allergies,
+                        assessment,
+                        treatment_plan
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (
+                        audio_id,
+                        "system",
+                        clinical_notes.get("chief_complaint"),
+                        clinical_notes.get("history_of_present_illness"),
+                        clinical_notes.get("associated_diseases"),
+                        clinical_notes.get("past_medical_history"),
+                        clinical_notes.get("drug_history"),
+                        clinical_notes.get("allergies"),
+                        clinical_notes.get("assessment"),
+                        clinical_notes.get("treatment_plan"),
+                    )
                 )
-            )
 
-            conn.commit()
-            logger.info(f"✅ Background processing completed (audio_id={audio_id})")
+                conn.commit()
+                db_saved = True
+                logger.info(f"✅ Background processing completed (audio_id={audio_id})")
+                break
 
-        except Exception as db_error:
-            conn.rollback()
-            raise RuntimeError(f"Database transaction failed: {db_error}")
+            except Exception as db_error:
+                if conn:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if db_attempt < 2:
+                    logger.warning(f"DB write failed (attempt {db_attempt+1}/3), retrying: {db_error}")
+                    time.sleep(1)
+                else:
+                    raise RuntimeError(f"Database transaction failed after 3 attempts: {db_error}")
+            finally:
+                if cursor:
+                    cursor.close()
+                if conn:
+                    conn.close()
 
     except Exception as e:
         logger.exception(f"❌ Processing failed (audio_id={audio_id}): {e}")
 
-        # 🔥 Mark failure so polling stops - use separate connection
-        fail_conn = None
-        fail_cursor = None
+        # 🔥 Mark failure so polling stops - use context manager for safety
         try:
-            fail_conn = get_mysql_connection()
-            fail_cursor = fail_conn.cursor()
-            fail_cursor.execute(
-                """
-                UPDATE audio_records
-                SET transcript_encrypted=%s
-                WHERE audio_id=%s
-                """,
-                (FAILED_MARKER, audio_id)
-            )
-            fail_conn.commit()
+            with get_db_connection() as fail_conn:
+                fail_cursor = fail_conn.cursor()
+                fail_cursor.execute(
+                    """
+                    UPDATE audio_records
+                    SET transcript_encrypted=%s
+                    WHERE audio_id=%s
+                    """,
+                    (FAILED_MARKER, audio_id)
+                )
+                fail_conn.commit()
+                fail_cursor.close()
         except Exception as fail_error:
             logger.exception(f"Failed to mark job as FAILED: {fail_error}")
-        finally:
-            if fail_cursor:
-                fail_cursor.close()
-            if fail_conn:
-                fail_conn.close()
 
         # 🧹 Cleanup failed audio file
         cleanup_audio_file(audio_path)
-
-    finally:
-        # 🧹 Always cleanup resources
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 # ------------------------------------------------------------------
 # 📤 Upload Consultation Audio
@@ -411,6 +435,12 @@ async def upload_consultation_audio(
             conn = get_mysql_connection()
             cursor = conn.cursor()
 
+            # BUG 2 FIX: Include audio_duration_seconds in the insert
+            try:
+                audio_duration = round(sf.info(audio_path).duration, 2)
+            except Exception:
+                audio_duration = None
+
             cursor.execute(
                 """
                 INSERT INTO audio_records (
@@ -418,15 +448,17 @@ async def upload_consultation_audio(
                     handling_clinician,
                     time_of_capture,
                     audio_file_path,
+                    audio_duration_seconds,
                     transcript_encrypted
                 )
-                VALUES (%s,%s,%s,%s,%s)
+                VALUES (%s,%s,%s,%s,%s,%s)
                 """,
                 (
                     patient_id,
                     clinician,
                     datetime.now(timezone.utc),
                     audio_path,
+                    audio_duration,
                     ""
                 )
             )
@@ -1114,9 +1146,15 @@ async def get_consultation(
     transcript = []
     encrypted = record["transcript_encrypted"]
 
-    if encrypted and encrypted != "FAILED":
+    if encrypted and encrypted != "FAILED" and encrypted != "QUEUED":
         decrypted = decrypt_text(encrypted, AES_KEY)
-        transcript = json.loads(decrypted) if decrypted else []
+        # BUG 3 FIX: Guard against corrupted/malformed JSON
+        if decrypted:
+            try:
+                transcript = json.loads(decrypted)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning("Failed to parse transcript JSON for audio_id=%s", audio_id)
+                transcript = []
         if isinstance(transcript, list):
             transcript = hydrate_transcript_variants(transcript)
 
@@ -1354,24 +1392,24 @@ def get_models_status():
 def get_patients():
     """Get list of all patients with their latest appointment info."""
     try:
-        conn = get_mysql_connection()
-        cursor = conn.cursor(dictionary=True)
-        
-        query = """
-            SELECT 
-                patient_id,
-                MAX(time_of_capture) as last_appointment,
-                COUNT(*) as total_appointments,
-                MAX(handling_clinician) as last_clinician
-            FROM audio_records
-            GROUP BY patient_id
-            ORDER BY MAX(time_of_capture) DESC
-        """
-        
-        cursor.execute(query)
-        patients = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        # BUG 1 FIX: Use context manager to prevent connection leaks
+        with get_db_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            
+            query = """
+                SELECT 
+                    patient_id,
+                    MAX(time_of_capture) as last_appointment,
+                    COUNT(*) as total_appointments,
+                    MAX(handling_clinician) as last_clinician
+                FROM audio_records
+                GROUP BY patient_id
+                ORDER BY MAX(time_of_capture) DESC
+            """
+            
+            cursor.execute(query)
+            patients = cursor.fetchall()
+            cursor.close()
         
         # Format datetime for JSON
         for patient in patients:
@@ -1395,26 +1433,26 @@ def get_patients():
 def get_patient_appointments(patient_id: str):
     """Get all appointments/consultations for a specific patient."""
     try:
-        conn = get_mysql_connection()
-        cursor = conn.cursor(dictionary=True)
-        
-        query = """
-            SELECT 
-                audio_id,
-                patient_id,
-                handling_clinician,
-                time_of_capture,
-                audio_duration_seconds,
-                created_at
-            FROM audio_records
-            WHERE patient_id = %s
-            ORDER BY time_of_capture DESC
-        """
-        
-        cursor.execute(query, (patient_id,))
-        appointments = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        # BUG 1 FIX: Use context manager to prevent connection leaks
+        with get_db_connection() as conn:
+            cursor = conn.cursor(dictionary=True)
+            
+            query = """
+                SELECT 
+                    audio_id,
+                    patient_id,
+                    handling_clinician,
+                    time_of_capture,
+                    audio_duration_seconds,
+                    created_at
+                FROM audio_records
+                WHERE patient_id = %s
+                ORDER BY time_of_capture DESC
+            """
+            
+            cursor.execute(query, (patient_id,))
+            appointments = cursor.fetchall()
+            cursor.close()
         
         if not appointments:
             raise HTTPException(
@@ -1485,17 +1523,7 @@ def root():
     }
 
 # ------------------------------------------------------------------
-# 🛑 Graceful Shutdown Handler
+# Shutdown logic is now handled by the lifespan context manager above.
+# The deprecated @app.on_event("shutdown") decorator has been removed.
 # ------------------------------------------------------------------
 
-@app.on_event("shutdown")
-def shutdown_event():
-    """Cleanup resources on shutdown."""
-    logger.info("Shutting down Voice EMR Backend...")
-    
-    try:
-        from app.db.mysql_connection import close_connection_pool
-        close_connection_pool()
-        logger.info("Database connections closed")
-    except Exception as e:
-        logger.error(f"Error during shutdown: {e}")
